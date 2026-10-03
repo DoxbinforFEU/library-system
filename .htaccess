@@ -1,0 +1,30 @@
+
+# FEU Roosevelt Library — web access restrictions (Apache 2.4 / XAMPP)
+# Place at the project root (htdocs/library/.htaccess).
+
+# Disable directory listing
+Options -Indexes
+
+# Block dotfiles (.env, .env.example, .git, etc.)
+<FilesMatch "^\.">
+    Require all denied
+</FilesMatch>
+
+# Block sensitive files and non-web artifacts
+<FilesMatch "\.(sql|bak|md|log|dump|sqlite3?|gz|zip|ini|env|example)$">
+    Require all denied
+</FilesMatch>
+
+# Block internal directories and bootstrap entry points
+<IfModule mod_rewrite.c>
+    RewriteEngine On
+    RewriteRule ^(includes|tools|backups|tests|sql)(/|$) - [F,L]
+    RewriteRule ^(config|bootstrap)\.php$ - [F,L]
+</IfModule>
+
+# Add security headers
+<IfModule mod_headers.c>
+    Header always set X-Content-Type-Options "nosniff"
+    Header always set X-Frame-Options "DENY"
+    Header always set Referrer-Policy "strict-origin-when-cross-origin"
+</IfModule>

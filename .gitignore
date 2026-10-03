@@ -1,0 +1,23 @@
+.env
+.env.*
+!.env.example
+
+# Local runtime and temporary files
+*.log
+*.tmp
+*.temp
+*.swp
+*.swo
+Thumbs.db
+.DS_Store
+
+# Local database exports and backups (keep the source schema.sql)
+*.sql.gz
+*.dump
+*.sqlite
+*.sqlite3
+*.sql.bak
+/backups/*.sql
+
+# Local editor metadata
+.idea/
