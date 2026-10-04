@@ -58,11 +58,34 @@ foreach ($overdueStmt as $row) {
     $overdue[] = $mapped;
 }
 
-$finesCollected = (float)$pdo->query("
+$finesAssessed = (float)$pdo->query("
     SELECT COALESCE(SUM(fine), 0)
     FROM transactions
     WHERE type = 'issue' AND status = 'Returned'
 ")->fetchColumn();
+
+$collectionRow = $pdo->prepare("
+    SELECT COUNT(*) AS titles,
+      COALESCE(SUM(status = 'Available'), 0) AS available,
+      COALESCE(SUM(status IN ('Borrowed','Overdue') AND due_date IS NOT NULL AND due_date < ?), 0) AS overdue,
+      COALESCE(SUM(status IN ('Borrowed','Overdue') AND (due_date IS NULL OR due_date >= ?)), 0) AS on_loan
+    FROM books WHERE deleted_at IS NULL
+");
+$collectionRow->execute([$today, $today]);
+$c = $collectionRow->fetch();
+$collection = [
+    'titles' => (int)$c['titles'],
+    'available' => (int)$c['available'],
+    'onLoan' => (int)$c['on_loan'],
+    'overdue' => (int)$c['overdue'],
+    'activePatrons' => (int)$pdo->query("SELECT COUNT(*) FROM users WHERE deleted_at IS NULL AND status = 'Active'")->fetchColumn(),
+];
+
+$dueTodayWhere = "type = 'issue' AND return_date IS NULL AND status IN ('Borrowed','Overdue') AND due_date = ?";
+$dueTodayCount = countRows($pdo, "SELECT COUNT(*) FROM transactions WHERE $dueTodayWhere", [$today]);
+$dueStmt = $pdo->prepare("SELECT * FROM transactions WHERE $dueTodayWhere ORDER BY id ASC LIMIT 10");
+$dueStmt->execute([$today]);
+$dueToday = array_map('mapTransaction', $dueStmt->fetchAll());
 
 $openLoans = (int)$pdo->query("
     SELECT COUNT(*) FROM transactions
@@ -86,11 +109,14 @@ sendResponse([
         ];
     }, $most),
     'overdue' => $overdue,
+    'dueToday' => $dueToday,
+    'collection' => $collection,
     'totals' => [
         'openLoans' => $openLoans,
         'overdueCount' => count($overdue),
         'estimatedOverdueFines' => round($totalEstFines, 2),
-        'finesCollected' => round($finesCollected, 2),
+        'finesAssessed' => round($finesAssessed, 2),
+        'dueTodayCount' => $dueTodayCount,
     ],
     'recent' => array_map('mapTransaction', $recent),
     'asOf' => $today,

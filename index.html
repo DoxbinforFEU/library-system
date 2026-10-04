@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>FEU Roosevelt Library — Discover, Read, Explore</title>
+<title>FEU Roosevelt Library — Administration</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400;9..144,500;9..144,600;9..144,700&family=Inter:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
@@ -122,13 +122,11 @@
           <div class="header-pop" id="notif-pop">
             <button class="icon-btn" id="notif-btn" aria-label="Notifications" aria-expanded="false" aria-controls="notif-menu">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M6 9a6 6 0 1 1 12 0c0 7 3 8 3 8H3s3-1 3-8"/><path d="M10 20a2 2 0 0 0 4 0"/></svg>
-              <span class="notif-dot" id="notif-dot"></span>
+              <span class="notif-dot" id="notif-dot" hidden></span>
             </button>
             <div class="dropdown-panel notif-menu" id="notif-menu" hidden>
               <div class="drop-head">Notifications</div>
-              <button class="drop-item" type="button"><span>3 titles are overdue</span><small>Today</small></button>
-              <button class="drop-item" type="button"><span>Due-date reminders sent</span><small>Yesterday</small></button>
-              <button class="drop-item" type="button"><span>Catalog sync complete</span><small>This week</small></button>
+              <div id="notif-list"></div>
             </div>
           </div>
           <div class="header-pop">
@@ -146,7 +144,6 @@
               <button class="drop-item" type="button" data-go="profile">Profile</button>
               <button class="drop-item" type="button" data-go="settings">Settings</button>
               <button class="drop-item" type="button" id="menu-theme-toggle">Dark Mode</button>
-              <button class="drop-item" type="button" id="menu-help">Help</button>
               <button class="drop-item danger" type="button" id="menu-logout">Logout</button>
             </div>
           </div>
@@ -168,7 +165,7 @@
               <p class="site-hero-sub">Explore the FEU Roosevelt Library collection, find your next book, and follow your curiosity.</p>
               <form class="site-hero-search" id="hero-search-form" role="search">
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/></svg>
-                <input type="text" id="hero-search-input" placeholder="Search books, authors, subjects…" autocomplete="off">
+                <input type="text" id="hero-search-input" placeholder="Search books, authors, subjects…" autocomplete="off" aria-label="Search books, authors, subjects">
                 <button type="submit" class="btn btn-primary hero-search-btn">Search</button>
               </form>
             </div>
@@ -242,7 +239,7 @@
                 <div class="service-card-body">
                   <div class="service-index">01</div>
                   <h3>Borrowing</h3>
-                  <p>Take home up to five titles at a time, with straightforward loan periods for students and faculty.</p>
+                  <p id="svc-borrowing-text">Take home titles from the collection, with straightforward loan periods for students and faculty.</p>
                 </div>
               </div>
               <div class="service-card">
@@ -257,8 +254,8 @@
                 <div class="service-card-photo"><img src="https://images.unsplash.com/photo-1481627834876-b7833e8f5570?auto=format&amp;fit=crop&amp;w=600&amp;q=75" alt="" loading="lazy"></div>
                 <div class="service-card-body">
                   <div class="service-index">03</div>
-                  <h3>Library hours</h3>
-                  <p>Open weekdays from 7:30 AM to 7:00 PM, and Saturdays from 8:00 AM to 4:00 PM.</p>
+                  <h3>Visit us</h3>
+                  <p id="svc-contact-text">Visit the front desk for help finding a title.</p>
                 </div>
               </div>
               <div class="service-card">
@@ -303,9 +300,9 @@
               </div>
               <div class="site-footer-col">
                 <div class="site-footer-label">Visit</div>
-                <span>Library Hours</span>
-                <span>Contact</span>
-                <span>Policies</span>
+                <span id="footer-address"></span>
+                <span id="footer-phone"></span>
+                <span id="footer-email"></span>
               </div>
             </div>
             <div class="site-footer-bottom">
@@ -347,6 +344,10 @@
               <button type="button" class="category-pill" data-category="Psychology">Psychology</button>
               <button type="button" class="category-pill" data-category="Arts">Arts</button>
               <button type="button" class="category-pill" data-category="Business">Business</button>
+              <button type="button" class="category-pill" data-category="Mathematics">Mathematics</button>
+              <button type="button" class="category-pill" data-category="Computer Science">Computer Science</button>
+              <button type="button" class="category-pill" data-category="Education">Education</button>
+              <button type="button" class="category-pill" data-category="Social Sciences">Social Sciences</button>
             </div>
           </div>
 
@@ -376,6 +377,8 @@
           </div>
 
           <div class="book-grid" id="books-grid"></div>
+
+          <div class="load-more-wrap" id="books-more-wrap" hidden><button class="btn btn-secondary" type="button" id="books-more">Show more</button></div>
 
           <div class="collection-empty" id="books-empty" hidden>
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.3"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/></svg>
@@ -411,9 +414,8 @@
                 <p class="bd-author" id="bd-author"></p>
                 <div class="bd-availability" id="bd-availability"></div>
                 <p class="bd-description" id="bd-description"></p>
-                <div class="bd-actions">
-                  <button class="btn btn-primary" type="button" id="bd-primary-action"></button>
-                  <button class="btn btn-secondary" type="button" id="bd-save-action"></button>
+                <div class="bd-actions" id="bd-actions">
+                  <button class="btn btn-primary" type="button" id="bd-primary-action" hidden>Issue this book</button>
                 </div>
                 <div class="bd-meta" id="bd-meta"></div>
                 <div class="bd-admin-links">
@@ -490,6 +492,7 @@
             </table>
           </div>
           <div class="card-list" id="users-card-list"></div>
+          <div class="load-more-wrap" id="users-more-wrap" hidden><button class="btn btn-secondary" type="button" id="users-more">Show more</button></div>
           <div class="empty-state" id="users-empty" style="display:none;">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.4"><circle cx="12" cy="8" r="3.4"/><path d="M4.5 20.2c1.4-3.6 4.2-5.4 7.5-5.4s6.1 1.8 7.5 5.4"/></svg>
             <div class="t">No matching patrons</div>
@@ -689,9 +692,9 @@
           <div class="panel">
             <div class="panel-head">
               <div class="panel-title reports-panel-title" id="reports-panel-title">Borrowing over the last 7 days</div>
-              <div class="panel-note">Demo data</div>
+              <div class="panel-note" id="reports-note">Live data</div>
             </div>
-            <div class="chart-wrap" id="reports-chart-wrap"></div>
+            <div class="chart-wrap" id="reports-chart-wrap" aria-live="polite"></div>
           </div>
           <div class="table-card" style="margin-top:18px;">
             <table class="data-table" id="reports-table">
@@ -776,11 +779,6 @@
                       <label>Account status</label>
                       <input id="profile-status" type="text" readonly>
                     </div>
-                    <div class="field">
-                      <label for="profile-password">New password</label>
-                      <input id="profile-password" type="password" autocomplete="new-password" placeholder="Use Security to change password" disabled>
-                      <div class="hint">Prototype only — passwords are never stored.</div>
-                    </div>
                   </div>
                   <div class="view-actions" id="profile-form-actions" hidden>
                     <button class="btn btn-secondary" type="button" id="profile-cancel-btn">Cancel</button>
@@ -811,7 +809,7 @@
               </div>
 
               <div class="settings-pane" id="settings-pane-library">
-                <p class="settings-lead">Circulation and contact details for this prototype. Saved on this device only.</p>
+                <p class="settings-lead">Circulation rules and contact details. Saved to the library database.</p>
                 <div class="form-grid">
                   <div class="field">
                     <label for="settings-library-name">Library name</label>
@@ -863,7 +861,7 @@
               </div>
 
               <div class="settings-pane" id="settings-pane-notifications">
-                <p class="settings-lead">Choose which alerts appear in this prototype. Nothing is emailed.</p>
+                <p class="settings-lead">Choose which alerts appear in the notification menu. Nothing is emailed.</p>
                 <label class="switch-row"><input type="checkbox" id="notif-due"><span class="switch-ui"></span><span>Due Date Reminders</span><span class="onoff">ON</span></label>
                 <label class="switch-row"><input type="checkbox" id="notif-overdue"><span class="switch-ui"></span><span>Overdue Book Alerts</span><span class="onoff">ON</span></label>
                 <label class="switch-row"><input type="checkbox" id="notif-newuser"><span class="switch-ui"></span><span>New User Notifications</span><span class="onoff">OFF</span></label>
@@ -915,15 +913,8 @@
               </div>
 
               <div class="settings-pane" id="settings-pane-system">
-                <p class="settings-lead">Display and list preferences for this workstation.</p>
+                <p class="settings-lead">Display and list preferences, saved to the library database.</p>
                 <div class="form-grid">
-                  <div class="field">
-                    <label for="sys-language">Language</label>
-                    <select id="sys-language">
-                      <option value="en">English</option>
-                      <option value="fil">Filipino</option>
-                    </select>
-                  </div>
                   <div class="field">
                     <label for="sys-date-format">Date format</label>
                     <select id="sys-date-format">
@@ -942,7 +933,7 @@
                   <div class="field">
                     <label for="sys-landing">Default landing page</label>
                     <select id="sys-landing">
-                      <option value="dashboard">Home</option>
+                      <option value="dashboard">Dashboard</option>
                       <option value="books">Books</option>
                       <option value="users">Users</option>
                       <option value="issue">Issue Book</option>

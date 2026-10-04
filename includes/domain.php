@@ -117,6 +117,7 @@ function mapBook(array $row): array {
         'cover' => $row['cover_url'],
         'createdAt' => $row['created_at'] ?? null,
         'renewalCount' => isset($row['renewal_count']) ? (int)$row['renewal_count'] : 0,
+        'borrowCount' => isset($row['borrow_count']) ? (int)$row['borrow_count'] : 0,
     ];
 }
 

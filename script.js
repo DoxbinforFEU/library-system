@@ -12,10 +12,43 @@ async function api(path, options = {}) {
   const res = await fetch(`${API_BASE}/${path}`, opts);
   let body = {};
   try { body = await res.json(); } catch (e) { body = {}; }
+  if (res.status === 401 && !path.startsWith("auth.php")) {
+    handleSessionExpired();
+    const e = new Error(body.error || "Your session has ended. Sign in again.");
+    e.sessionExpired = true;
+    throw e;
+  }
   if (!res.ok) {
     throw new Error(body.error || `Request failed (${res.status})`);
   }
   return body;
+}
+
+/* One handler for expired sessions: return to the sign-in screen once. */
+let sessionExpiredHandled = false;
+function handleSessionExpired(){
+  if (sessionExpiredHandled) return;
+  sessionExpiredHandled = true;
+  const modalRoot = document.getElementById("modal-root");
+  const confirmRoot = document.getElementById("confirm-root");
+  if (modalRoot) modalRoot.innerHTML = "";
+  if (confirmRoot) confirmRoot.innerHTML = "";
+  document.body.style.overflow = "";
+  showLoginScreen("Your session has ended. Sign in again.");
+}
+
+/* Load every page of a paginated list endpoint (server caps each page at 200). */
+async function fetchAllPages(path, key) {
+  const PAGE = 200;
+  let offset = 0, all = [];
+  for (;;) {
+    const data = await api(`${path}?limit=${PAGE}&offset=${offset}`);
+    const rows = data[key] || [];
+    all = all.concat(rows);
+    offset += rows.length;
+    if (!rows.length || offset >= (data.total ?? offset)) break;
+  }
+  return all;
 }
 
 function mapBook(row) {
@@ -34,6 +67,7 @@ function mapBook(row) {
     description: row.description,
     format: row.format,
     cover: row.cover ?? row.cover_url ?? null,
+    borrowCount: Number(row.borrowCount ?? row.borrow_count ?? 0),
   };
 }
 function mapUser(row) {
@@ -68,13 +102,11 @@ function mapTx(row) {
 }
 
 async function refreshBooks() {
-  const data = await api("books.php");
-  BOOKS = (data.books || []).map(mapBook);
+  BOOKS = (await fetchAllPages("books.php", "books")).map(mapBook);
   syncIdCounters();
 }
 async function refreshUsers() {
-  const data = await api("users.php");
-  USERS = (data.users || []).map(mapUser);
+  USERS = (await fetchAllPages("users.php", "users")).map(mapUser);
   syncIdCounters();
 }
 async function refreshTransactions() {
@@ -82,21 +114,20 @@ async function refreshTransactions() {
   TRANSACTIONS = (data.transactions || []).map(mapTx);
   syncIdCounters();
 }
+/* Circulation changes both a book and a patron's borrowed list; nothing else needs refetching. */
 async function refreshCatalog() {
-  await Promise.all([refreshBooks(), refreshUsers(), refreshTransactions()]);
+  await Promise.all([refreshBooks(), refreshUsers()]);
 }
 async function bootstrapFromApi() {
-  const [books, users, txs, settings, account, notifs] = await Promise.all([
-    api("books.php"),
-    api("users.php"),
-    api("transactions.php"),
+  const [books, users, settings, account, notifs] = await Promise.all([
+    fetchAllPages("books.php", "books"),
+    fetchAllPages("users.php", "users"),
     api("settings.php"),
     api("account.php"),
     api("notifs.php"),
   ]);
-  BOOKS = (books.books || []).map(mapBook);
-  USERS = (users.users || []).map(mapUser);
-  TRANSACTIONS = (txs.transactions || []).map(mapTx);
+  BOOKS = books.map(mapBook);
+  USERS = users.map(mapUser);
   if (settings.settings) Object.assign(CONFIG, settings.settings);
   if (account.account) Object.assign(ACCOUNT, account.account);
   const prefs = notifs.notifPrefs || notifs.prefs;
@@ -191,7 +222,7 @@ async function persistNotifs(){
   if (prefs) Object.assign(NOTIF_PREFS, prefs);
 }
 
-const CATEGORIES = ["Literature","Science","History","Philosophy","Technology","Psychology","Arts","Business"];
+const CATEGORIES = ["Literature","Science","History","Philosophy","Technology","Psychology","Arts","Business","Mathematics","Computer Science","Education","Social Sciences"]; // must match BOOK_CATEGORIES in includes/validation.php
 
 let nextBookId = 1;
 let nextUserId = 1;
@@ -212,93 +243,36 @@ function addDaysISO(iso, n){
 }
 function isoDaysAgo(n){ return addDaysISO(manilaToday(), -n); }
 function isoDaysFromNow(n){ return addDaysISO(manilaToday(), n); }
+/* Calendar dates (YYYY-MM-DD) are parsed and formatted as UTC calendar days so the browser's timezone never shifts them. */
+function parseISODate(iso){
+  const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(String(iso || ""));
+  return m ? new Date(Date.UTC(+m[1], +m[2]-1, +m[3])) : null;
+}
 function fmtDate(iso){
-  if(!iso) return "—";
-  const d = new Date(iso + "T00:00:00");
-  if(CONFIG.dateFormat==="iso") return iso;
-  if(CONFIG.dateFormat==="long") return d.toLocaleDateString("en-US",{weekday:"long", month:"long", day:"numeric", year:"numeric"});
-  return d.toLocaleDateString("en-US",{month:"short", day:"numeric", year:"numeric"});
+  const d = parseISODate(iso);
+  if(!d) return "—";
+  if(CONFIG.dateFormat==="iso") return d.toISOString().slice(0,10);
+  if(CONFIG.dateFormat==="long") return d.toLocaleDateString("en-US",{timeZone:"UTC", weekday:"long", month:"long", day:"numeric", year:"numeric"});
+  return d.toLocaleDateString("en-US",{timeZone:"UTC", month:"short", day:"numeric", year:"numeric"});
 }
 function fmtDateTime(iso){
   if(!iso) return "—";
   const d = new Date(iso);
-  const date = d.toLocaleDateString("en-US",{month:"short", day:"numeric", year:"numeric"});
-  const time = d.toLocaleTimeString("en-US",{hour:"numeric", minute:"2-digit", hour12: CONFIG.timeFormat!=="24h"});
+  if(isNaN(d)) return "—";
+  const date = d.toLocaleDateString("en-US",{timeZone:APP_TZ, month:"short", day:"numeric", year:"numeric"});
+  const time = d.toLocaleTimeString("en-US",{timeZone:APP_TZ, hour:"numeric", minute:"2-digit", hour12: CONFIG.timeFormat!=="24h"});
   return date + " · " + time;
 }
 function cssVar(name){
   return getComputedStyle(document.documentElement).getPropertyValue(name).trim();
 }
 function daysBetween(a,b){
-  const A = new Date(a+"T00:00:00"), B = new Date(b+"T00:00:00");
+  const A = parseISODate(a), B = parseISODate(b);
+  if(!A || !B) return 0;
   return Math.round((B-A) / 86400000);
 }
 
-const BOOK_SEED = [
-  ["The Great Gatsby","F. Scott Fitzgerald","Literature","9780743273565",1925,"A-12"],
-  ["Clean Code","Robert C. Martin","Technology","9780132350884",2008,"B-04"],
-  ["Atomic Habits","James Clear","Psychology","9780735211292",2018,"C-07"],
-  ["A Brief History of Time","Stephen Hawking","Science","9780553380163",1988,"D-19"],
-  ["Sapiens","Yuval Noah Harari","History","9780062316097",2011,"D-02"],
-  ["Meditations","Marcus Aurelius","Philosophy","9780140449334",180,"E-11"],
-  ["Leaves of Grass","Walt Whitman","Literature","9781593080834",1855,"F-03"],
-  ["The Design of Everyday Things","Don Norman","Arts","9780465050659",2013,"B-18"],
-  ["1984","George Orwell","Literature","9780451524935",1949,"A-01"],
-  ["The Pragmatic Programmer","Andrew Hunt","Technology","9780135957059",2019,"B-09"],
-  ["Deep Work","Cal Newport","Business","9781455586691",2016,"C-14"],
-  ["Cosmos","Carl Sagan","Science","9780345539434",1980,"D-06"],
-  ["Guns, Germs, and Steel","Jared Diamond","History","9780393317558",1997,"D-22"],
-  ["The Republic","Plato","Philosophy","9780140449140",-380,"E-02"],
-  ["Ariel","Sylvia Plath","Literature","9780061148518",1965,"F-08"],
-  ["Don't Make Me Think","Steve Krug","Arts","9780321965516",2000,"B-21"],
-  ["To Kill a Mockingbird","Harper Lee","Literature","9780061120084",1960,"A-07"],
-  ["Refactoring","Martin Fowler","Technology","9780134757599",1999,"B-13"],
-  ["The Power of Habit","Charles Duhigg","Business","9780812981605",2012,"C-03"],
-  ["Astrophysics for People in a Hurry","Neil deGrasse Tyson","Science","9780393609394",2017,"D-25"],
-  ["The Silk Roads","Peter Frankopan","History","9781101912379",2015,"D-11"],
-  ["Beyond Good and Evil","Friedrich Nietzsche","Philosophy","9780486298689",1886,"E-17"],
-  ["The Waste Land","T.S. Eliot","Literature","9780156948777",1922,"F-14"],
-  ["Emotional Design","Don Norman","Arts","9780465051366",2004,"B-25"],
-  ["Brave New World","Aldous Huxley","Literature","9780060850524",1932,"A-15"],
-  ["Design Patterns","Erich Gamma","Technology","9780201633610",1994,"B-01"],
-  ["Educated","Tara Westover","Psychology","9780399590504",2018,"C-19"],
-  ["The Selfish Gene","Richard Dawkins","Science","9780198788607",1976,"D-14"],
-];
-
-/* ---- Discovery metadata: short original blurbs + format, keyed by title.
-   Written for this prototype (not sourced from jacket copy). ---- */
-const BOOK_BLURBS = {
-  "The Great Gatsby":"A glittering, doomed summer on Long Island, and a man who reinvents himself for a love that's already gone.",
-  "Clean Code":"A practical field guide to writing software that's easy to read, change, and trust a year from now.",
-  "Atomic Habits":"A clear framework for building good habits and breaking bad ones through small, compounding changes.",
-  "A Brief History of Time":"An accessible tour of cosmology — from the Big Bang to black holes — for readers without a physics background.",
-  "Sapiens":"A sweeping look at how Homo sapiens came to dominate the planet, told through myths, money, and empires.",
-  "Meditations":"The private notebook of a Roman emperor, working out how to stay calm, fair, and useful.",
-  "Leaves of Grass":"An expansive, restless collection that helped define the sound of American poetry.",
-  "The Design of Everyday Things":"Why so many everyday objects confuse us, and what good design owes the people who use it.",
-  "1984":"A totalitarian future where language itself is rewritten to make dissent unthinkable.",
-  "The Pragmatic Programmer":"Field-tested habits and principles for writing adaptable, well-crafted software.",
-  "Deep Work":"An argument for protecting long stretches of undistracted focus in an economy built to fragment it.",
-  "Cosmos":"A warm, wide-eyed guided tour of the universe and our small, remarkable place in it.",
-  "Guns, Germs, and Steel":"An attempt to explain why history's advantages fell to some societies and not others.",
-  "The Republic":"A dialogue on justice, the soul, and what an ideal city would actually require.",
-  "Ariel":"Intense, precise poems written in a final, prolific burst near the end of the poet's life.",
-  "Don't Make Me Think":"A short, practical case for usability: if people have to stop and think, the design has failed.",
-  "To Kill a Mockingbird":"A small Southern town, a wrongful trial, and a child's early lessons in conscience.",
-  "Refactoring":"A catalog of small, safe steps for improving the structure of existing code.",
-  "The Power of Habit":"How habits form, why they're hard to break, and how organizations use that to their advantage.",
-  "Astrophysics for People in a Hurry":"Big cosmic ideas delivered in short, digestible chapters for a busy reader.",
-  "The Silk Roads":"A retelling of world history centered on the trade routes linking East and West.",
-  "Beyond Good and Evil":"A provocation aimed at the moral assumptions philosophy usually leaves unquestioned.",
-  "The Waste Land":"A fragmented, allusive modernist poem written in the shadow of a broken postwar world.",
-  "Emotional Design":"On why we love — or hate — the objects we use, and what feeling has to do with function.",
-  "Brave New World":"A society engineered for comfort and stability, at the quiet cost of everything else.",
-  "Design Patterns":"Reusable solutions to recurring problems in object-oriented software design.",
-  "Educated":"A memoir of growing up off the grid, and the long, disorienting road to a formal education.",
-  "The Selfish Gene":"A gene's-eye view of evolution that reframed how a generation thought about natural selection.",
-};
 const FORMATS = ["Hardcover","Paperback","E-book","Audiobook"];
-function formatForBook(i){ return FORMATS[i % FORMATS.length]; }
 
 /* ---- Patron names are stored as three fields (last, first, middle initial)
    and shown as "Last, First M." — e.g. "Dela Cruz, Juan D." ---- */
@@ -307,52 +281,9 @@ function formatUserName(lastName, firstName, middleInitial){
   return `${lastName}, ${firstName}${mi}`;
 }
 
-// [lastName, firstName, middleInitial, program, yearLevel, contact]
-const STUDENT_SEED = [
-  ["Dela Cruz","Juan","","BSIT",2,"juan.delacruz@feuroosevelt.edu"],
-  ["Santos","Maria","","BSIT",2,"maria.santos@feuroosevelt.edu"],
-  ["Bonifacio Jr.","Andres","","BS Architecture",3,"andres.b@feuroosevelt.edu"],
-  ["Reyes","Liza","","BS Psychology",1,"liza.reyes@feuroosevelt.edu"],
-  ["Mendoza","Carlo","","BS Civil Engineering",4,"carlo.mendoza@feuroosevelt.edu"],
-  ["Villanueva","Bea","","BS Nursing",2,"bea.villanueva@feuroosevelt.edu"],
-  ["Torres","Miguel","","BSIT",3,"miguel.torres@feuroosevelt.edu"],
-  ["Ramos","Sofia","","BS Biology",1,"sofia.ramos@feuroosevelt.edu"],
-  ["Cruz","Nathaniel","","BS Accountancy",4,"nathaniel.cruz@feuroosevelt.edu"],
-  ["Garcia","Isabel","","BS Architecture",2,"isabel.garcia@feuroosevelt.edu"],
-  ["Aquino","Rafael","","BSIT",1,"rafael.aquino@feuroosevelt.edu"],
-  ["Ocampo","Camille","","BS Psychology",3,"camille.ocampo@feuroosevelt.edu"],
-  ["Fernandez","Diego","","BS Civil Engineering",2,"diego.fernandez@feuroosevelt.edu"],
-  ["Lim","Patricia","","BS Nursing",4,"patricia.lim@feuroosevelt.edu"],
-];
-
-/* ---- A few seed ISBNs don't resolve to a cover image on Open Library,
-   so those three titles fall back to a plain color block instead of a
-   real photo. This maps just those titles to a working cover image. ---- */
-const COVER_OVERRIDES = {
-  "Leaves of Grass": "https://covers.openlibrary.org/b/id/13323903-L.jpg",
-  "The Republic": "https://covers.openlibrary.org/b/id/2324117-L.jpg",
-  "Ariel": "https://covers.openlibrary.org/b/id/33280-L.jpg",
-};
-
 let BOOKS = [];
 let USERS = [];
 let TRANSACTIONS = [];
-
-/* ---- 7-day activity series (issued vs returned), demo counts ---- */
-const ACTIVITY_SERIES = {
-  labels: ["Mon","Tue","Wed","Thu","Fri","Sat","Sun"],
-  issued:   [6, 9, 5, 11, 8, 4, 7],
-  returned: [4, 6, 8, 7, 9, 3, 5],
-};
-
-const MOST_BORROWED = [
-  {title:"Atomic Habits", count:41},
-  {title:"Clean Code", count:33},
-  {title:"1984", count:29},
-  {title:"Sapiens", count:24},
-  {title:"Deep Work", count:19},
-];
-
 
 /* ==================================================================
    ANIMATIONS.JS — reusable GSAP helpers
@@ -518,27 +449,18 @@ const state = {
   issue:{ step:1, studentId:null, bookId:null },
   ret:{ step:1, txId:null, returnDate:null },
   selectedBookId:null,
+  booksLimit:48, booksSig:"", usersLimit:0, usersSig:"",
+  reportType:"borrowing",
 };
 
-/* ---- Discovery: saved / reserved / recently viewed / recent searches.
-   All mock/local — saved items and recent searches persist to localStorage
-   so the "premium library" feeling survives a refresh; reservations are a
-   pure in-session mock since there's no backend to hold them against. ---- */
-const DISCOVERY_STORAGE = { saved:"feu-saved-books", recent:"feu-recently-viewed", searches:"feu-recent-searches" };
+/* ---- Browser-local UI state only: recently viewed titles and recent searches. ---- */
+const DISCOVERY_STORAGE = { recent:"feu-recently-viewed", searches:"feu-recent-searches" };
 function loadIdList(key){ try{ return JSON.parse(localStorage.getItem(key) || "[]"); }catch(e){ return []; } }
 function saveIdList(key, list){ try{ localStorage.setItem(key, JSON.stringify(list)); }catch(e){} }
 
-let savedBookIds = new Set(loadIdList(DISCOVERY_STORAGE.saved));
-let reservedBookIds = new Set();
 let recentlyViewedIds = loadIdList(DISCOVERY_STORAGE.recent);
 let recentSearches = loadIdList(DISCOVERY_STORAGE.searches);
 
-function toggleSavedBook(id){
-  const wasSaved = savedBookIds.has(id);
-  wasSaved ? savedBookIds.delete(id) : savedBookIds.add(id);
-  saveIdList(DISCOVERY_STORAGE.saved, Array.from(savedBookIds));
-  return !wasSaved;
-}
 function pushRecentlyViewed(id){
   recentlyViewedIds = [id, ...recentlyViewedIds.filter(x=>x!==id)].slice(0,8);
   saveIdList(DISCOVERY_STORAGE.recent, recentlyViewedIds);
@@ -567,6 +489,7 @@ function esc(str){
   return String(str ?? "").replace(/[&<>"']/g, c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 }
 function initialsOf(name){
+  name = String(name || "");
   // "Last, First M." -> first initial + last initial (e.g. "Dela Cruz, Juan D." -> "JD")
   if(name.includes(",")){
     const [last, rest] = name.split(",");
@@ -583,7 +506,7 @@ function userNameMatches(u, q){
 }
 function badgeClassFor(status){
   return {Available:"badge-available", Borrowed:"badge-borrowed", Overdue:"badge-overdue",
-          Active:"badge-active", Inactive:"badge-inactive"}[status] || "badge-inactive";
+          Active:"badge-active", Inactive:"badge-inactive", Returned:"badge-available"}[status] || "badge-inactive";
 }
 function findBook(id){ return BOOKS.find(b=>b.id===id); }
 function findUser(id){ return USERS.find(u=>u.id===id); }
@@ -618,7 +541,7 @@ function goToView(viewName, opts={}){
     if(viewName === "books") renderBooks();
     if(viewName === "book-details") renderBookDetails(state.selectedBookId);
     if(viewName === "users") renderUsers();
-    if(viewName === "issue") resetIssueWizard();
+    if(viewName === "issue") resetIssueWizard(opts.bookId);
     if(viewName === "return") resetReturnWizard();
     if(viewName === "reports") renderReports(opts.report || "borrowing");
     if(viewName === "dashboard") { renderDashboard(); }
@@ -644,14 +567,32 @@ $all("[data-view]").forEach(btn=>{
   });
 });
 
-/* ---------- Homepage explore chips: route straight into the Collection,
-   pre-filtered to the chosen subject. ---------- */
-$all("#explore-categories .explore-chip[data-category]").forEach(chip=>{
-  chip.addEventListener("click", ()=>{
-    state.books.search = "";
-    state.books.category = chip.dataset.category;
-    goToView("books", {force:true});
+/* In-page anchors (Services / About) live on the homepage. From any other
+   view, navigate home first, then smooth-scroll once the transition settles. */
+$all("[data-anchor]").forEach(btn=>{
+  btn.addEventListener("click", ()=>{
+    const id = btn.dataset.anchor;
+    const jump = ()=> document.getElementById(id)?.scrollIntoView({behavior:"smooth", block:"start"});
+    if(state.currentView !== "dashboard"){
+      goToView("dashboard");
+      setTimeout(jump, 460);
+    } else {
+      jump();
+    }
+    closeMobileNav();
   });
+});
+
+/* Hero search routes into the Collection view with that query applied. */
+$("#hero-search-form")?.addEventListener("submit", e=>{
+  e.preventDefault();
+  const q = $("#hero-search-input")?.value || "";
+  state.books.search = q;
+  state.books.category = "all";
+  state.books.filters = emptyFilters();
+  if(q.trim()) pushRecentSearch(q);
+  goToView("books", {force:true});
+  setTimeout(()=>{ const f = $("#books-search"); if(f) f.value = q; toggleSearchClear(); }, 420);
 });
 
 /* ---------------- Header menus + mobile nav ---------------- */
@@ -684,35 +625,6 @@ $("#search-toggle-btn")?.addEventListener("click", ()=>{
   const open = field.classList.toggle("mobile-open");
   $("#search-toggle-btn").setAttribute("aria-expanded", String(open));
   if(open) setTimeout(()=> $("#global-search")?.focus(), 60);
-});
-
-/* In-page anchors (Services / About) live on the homepage. From any other
-   view, navigate home first, then smooth-scroll once the transition settles. */
-$all("[data-anchor]").forEach(btn=>{
-  btn.addEventListener("click", ()=>{
-    const id = btn.dataset.anchor;
-    const jump = ()=> document.getElementById(id)?.scrollIntoView({behavior:"smooth", block:"start"});
-    if(state.currentView !== "dashboard"){
-      goToView("dashboard");
-      setTimeout(jump, 460);
-    } else {
-      jump();
-    }
-    closeMobileNav();
-  });
-});
-
-/* Hero search on the homepage mirrors the header's global search field and
-   routes into the Collection view with that query applied. */
-$("#hero-search-form")?.addEventListener("submit", e=>{
-  e.preventDefault();
-  const q = $("#hero-search-input")?.value || "";
-  state.books.search = q;
-  state.books.category = "all";
-  state.books.filters = emptyFilters();
-  if(q.trim()) pushRecentSearch(q);
-  goToView("books", {force:true});
-  setTimeout(()=>{ const f = $("#books-search"); if(f) f.value = q; }, 420);
 });
 
 $all(".menu-drop > .menu-link").forEach(btn=>{
@@ -765,10 +677,6 @@ $all("[data-go]").forEach(btn=>{
     closeAllPopovers();
   });
 });
-$("#menu-help").addEventListener("click", ()=>{
-  closeAllPopovers();
-  showToast("Help desk is a prototype. Contact the librarian for catalog questions.");
-});
 $("#menu-logout").addEventListener("click", ()=>{
   closeAllPopovers();
   renderConfirm({
@@ -792,43 +700,37 @@ function applyTheme(pref, persist=true){
   $all(".theme-card").forEach(c=> c.classList.toggle("active", c.dataset.themePref===pref));
   const toggle = $("#menu-theme-toggle");
   if(toggle) toggle.textContent = resolved==="dark" ? "Light Mode" : "Dark Mode";
-  if(typeof renderDashboard==="function" && state.currentView==="dashboard") renderDashboard();
-  if(state.currentView==="reports") renderReports("borrowing");
+  if(state.currentView==="dashboard") renderDashboard({cached:true});
+  if(state.currentView==="reports") renderReports(state.reportType, {cached:true});
 }
 window.matchMedia("(prefers-color-scheme: dark)").addEventListener("change", ()=>{
   if((localStorage.getItem(STORAGE.theme)||"light")==="system") applyTheme("system", false);
 });
 
 /* ==================================================================
-   HOMEPAGE RENDERING (editorial homepage — Phase 1)
+   BOOK CARDS (shared by collection, related and recently viewed)
    ================================================================== */
 const BOOK_CARD_COLORS = ["var(--green)","var(--green-deep)","var(--oxblood)","var(--brass)","var(--navy-badge)"];
-function colorForBook(book, i){
-  return BOOK_CARD_COLORS[i % BOOK_CARD_COLORS.length];
-}
+function colorForBook(book, i){ return BOOK_CARD_COLORS[i % BOOK_CARD_COLORS.length]; }
 function bookInitial(book){
-  return book.title.replace(/^(the|a|an)\s+/i,"").trim()[0].toUpperCase();
+  const t = String(book.title || "").replace(/^(the|a|an)\s+/i,"").trim();
+  return (t[0] || "?").toUpperCase();
 }
-/* A book's patron-facing availability, folding the mock "reserved" local
-   state in ahead of its underlying catalog status. */
 function availabilityBucket(book){
-  if(reservedBookIds.has(book.id)) return "Reserved";
-  return book.status==="Available" ? "Available" : "Borrowed";
+  if(book.status==="Available") return "Available";
+  return book.status==="Overdue" ? "Overdue" : "Borrowed";
 }
 function availabilityBadgeClass(bucket){
-  return {Available:"badge-available", Borrowed:"badge-borrowed", Reserved:"badge-active"}[bucket] || "badge-inactive";
+  return {Available:"badge-available", Borrowed:"badge-borrowed", Overdue:"badge-overdue"}[bucket] || "badge-inactive";
 }
-
-/* ---------- BookCard — the one reusable card used on the homepage,
-   the collection grid, related books, and recently viewed. ---------- */
 function bookCardHTML(book, i, opts={}){
   const bucket = availabilityBucket(book);
   return `
-    <div class="book-card${opts.featured ? " book-card-featured" : ""}" data-book-id="${book.id}" tabindex="0" role="button" aria-label="View ${esc(book.title)} by ${esc(book.author)}">
+    <div class="book-card${opts.featured ? " book-card-featured" : ""}" data-book-id="${esc(book.id)}" tabindex="0" role="button" aria-label="View ${esc(book.title)} by ${esc(book.author)}">
       <div class="book-card-face" style="--book-color:${colorForBook(book,i)}">
         <div class="book-card-initial">${esc(bookInitial(book))}</div>
         ${book.cover ? `<img class="book-card-cover" src="${esc(book.cover)}" alt="" loading="lazy" onerror="this.remove()">` : ""}
-        ${opts.hideAvailability ? "" : `<span class="book-card-availability-pill ${availabilityBadgeClass(bucket)}">${esc(bucket)}</span>`}
+        <span class="book-card-availability-pill ${availabilityBadgeClass(bucket)}">${esc(bucket)}</span>
         <span class="book-card-hover-cta">View book
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M5 12h14M13 6l6 6-6 6"/></svg>
         </span>
@@ -836,7 +738,7 @@ function bookCardHTML(book, i, opts={}){
       <div class="book-card-body">
         <div class="book-card-top-row">
           <span class="book-card-cat">${esc(book.category)}</span>
-          ${opts.hideAvailability ? "" : `<span class="book-card-dot ${availabilityBadgeClass(bucket)}" title="${bucket}"></span>`}
+          <span class="book-card-dot ${availabilityBadgeClass(bucket)}" title="${esc(bucket)}"></span>
         </div>
         <div class="book-card-title">${esc(book.title)}</div>
         <div class="book-card-author">${esc(book.author)}</div>
@@ -854,38 +756,62 @@ function renderBookRow(containerId, books){
   const row = document.getElementById(containerId);
   if(!row) return;
   row.innerHTML = books.map((b,i)=> bookCardHTML(b,i)).join("");
-  revealStagger($all(".book-card", row),{y:10, stagger:0.04});
+  const cards = $all(".book-card", row);
+  if(cards.length) revealStagger(cards,{y:10, stagger:0.04});
   wireBookCards(row);
 }
+
+/* ==================================================================
+   REPORTS — all figures come from api/reports.php
+   ================================================================== */
+let REPORT = null;
+async function loadReport(){ REPORT = await api("reports.php"); return REPORT; }
+function peso(n){ return "₱" + Number(n || 0).toFixed(2); }
+function errorWithRetry(el, msg, onRetry){
+  el.innerHTML = `<div class="dash-status" role="alert" style="margin:0;"><span>${esc(msg)}</span><button class="btn btn-secondary btn-sm" type="button" data-retry>Retry</button></div>`;
+  el.querySelector("[data-retry]").addEventListener("click", onRetry);
+}
+
 function renderHomepage(){
-  // Featured: a hand-spread sample across categories, for variety.
-  // Kept to five titles, editorial-style, so the row reads as a curated
-  // pick rather than another long scrolling shelf.
+  // Featured: one real title from each of the first five categories found in the catalog.
   const seenCats = new Set();
   const featured = [];
   for(const b of BOOKS){
-    if(!seenCats.has(b.category)){ seenCats.add(b.category); featured.push(b); }
+    const cat = b.category || "Uncategorized";
+    if(!seenCats.has(cat)){ seenCats.add(cat); featured.push(b); }
     if(featured.length>=5) break;
   }
-  renderBookRow("featured-collection-grid", featured);
-
-  // New to the collection: most recently published, newest first.
-  const newArrivals = BOOKS.slice().sort((a,b)=> b.year - a.year).slice(0,10);
-  renderBookRow("new-arrivals-grid", newArrivals);
-
-  const yr = $("#footer-year");
-  if(yr) yr.textContent = String(new Date().getFullYear());
+  const grid = $("#featured-collection-grid");
+  if(featured.length){
+    renderBookRow("featured-collection-grid", featured);
+  } else if(grid){
+    grid.innerHTML = `<p class="site-section-sub">No books in the catalog yet. Add one from Collection.</p>`;
+  }
+  // Text that states library rules or contact details comes from the saved settings.
+  const days = CONFIG.loanDays, max = CONFIG.maxBooksPerUser;
+  const borrow = $("#svc-borrowing-text");
+  if(borrow) borrow.textContent = `Take home up to ${max} ${max===1?"title":"titles"} at a time, with a ${days}-day loan period.`;
+  const contact = [CONFIG.libraryAddress, CONFIG.libraryPhone, CONFIG.libraryEmail].filter(Boolean);
+  const svc = $("#svc-contact-text");
+  if(svc && contact.length) svc.textContent = contact.join(" · ");
+  const setText = (id, v)=>{ const el = $(id); if(el) el.textContent = v || ""; };
+  setText("#footer-address", CONFIG.libraryAddress);
+  setText("#footer-phone", CONFIG.libraryPhone);
+  setText("#footer-email", CONFIG.libraryEmail);
+  setText("#footer-year", String(new Date().getFullYear()));
 }
-function renderDashboard(){
+function renderDashboard(opts={}){
   renderHomepage();
+  if(!opts.cached) refreshNotifications();
 }
 
-function renderActivityChart(targetId){
-  const wrap = document.getElementById(targetId || "activity-chart-wrap");
+function renderActivityChart(targetId, activity){
+  const wrap = document.getElementById(targetId);
   const W=560,H=200,pad=28;
-  const {labels,issued,returned} = ACTIVITY_SERIES;
-  const maxV = Math.max(...issued,...returned) * 1.15;
-  const stepX = (W - pad*2) / (labels.length-1);
+  const labels = activity.map(a=>a.label), issued = activity.map(a=>a.issued), returned = activity.map(a=>a.returned);
+  const total = issued.concat(returned).reduce((x,y)=>x+y,0);
+  const maxV = Math.max(1, ...issued, ...returned) * 1.15;
+  const stepX = (W - pad*2) / Math.max(1, labels.length-1);
   const toXY = (arr,i) => [pad + stepX*i, H - pad - (arr[i]/maxV)*(H-pad*2)];
   const pathFrom = arr => arr.map((_,i)=>{
     const [x,y]=toXY(arr,i); return (i===0?"M":"L") + x.toFixed(1) + " " + y.toFixed(1);
@@ -895,132 +821,43 @@ function renderActivityChart(targetId){
     const y = pad + (H-pad*2)*(i/3);
     gridLines += `<line x1="${pad}" y1="${y.toFixed(1)}" x2="${W-pad}" y2="${y.toFixed(1)}" stroke="${cssVar("--paper-2")}" stroke-width="1"/>`;
   }
-  let xLabels = labels.map((l,i)=>{
+  const xLabels = labels.map((l,i)=>{
     const [x] = toXY(issued,i);
-    return `<text x="${x}" y="${H-6}" font-family="IBM Plex Mono" font-size="10" fill="${cssVar("--ink-soft")}" text-anchor="middle">${l}</text>`;
+    return `<text x="${x}" y="${H-6}" font-family="IBM Plex Mono" font-size="10" fill="${cssVar("--ink-soft")}" text-anchor="middle">${esc(l)}</text>`;
   }).join("");
   const green = cssVar("--green") || "#237A43";
   const brass = cssVar("--brass") || "#EBB134";
-  let dotsIssued = issued.map((v,i)=>{const[x,y]=toXY(issued,i); return `<circle cx="${x}" cy="${y}" r="3" fill="${green}"/>`;}).join("");
-  let dotsReturned = returned.map((v,i)=>{const[x,y]=toXY(returned,i); return `<circle cx="${x}" cy="${y}" r="3" fill="${brass}"/>`;}).join("");
-
-  wrap.innerHTML = `<svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="xMidYMid meet">
+  const dots = (arr,color)=> arr.map((v,i)=>{const[x,y]=toXY(arr,i); return `<circle cx="${x}" cy="${y}" r="3" fill="${color}"><title>${esc(labels[i])}: ${v}</title></circle>`;}).join("");
+  wrap.innerHTML = `<svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="xMidYMid meet" role="img" aria-label="Books issued and returned per day over the last 7 days">
     ${gridLines}
     <path class="js-path-issued" d="${pathFrom(issued)}" fill="none" stroke="${green}" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>
     <path class="js-path-returned" d="${pathFrom(returned)}" fill="none" stroke="${brass}" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>
-    ${dotsIssued}${dotsReturned}
+    ${dots(issued,green)}${dots(returned,brass)}
     ${xLabels}
-  </svg>`;
+  </svg>` + (total===0 ? `<div class="chart-empty">No borrowing activity in the last 7 days.</div>` : "");
   requestAnimationFrame(()=>{
     drawPath(wrap.querySelector(".js-path-issued"),{duration:1.1});
     drawPath(wrap.querySelector(".js-path-returned"),{duration:1.1, delay:0.15});
-    gsap.from(wrap.querySelectorAll("circle"),{opacity:0, scale:0, duration:0.4, stagger:0.03, delay:0.9, ease:"back.out(3)"});
   });
 }
 
-function renderShelfBar(){
-  const bar = $("#shelf-bar");
-  const total = 1248, available=936, borrowed=288, overdue=24;
-  const segments = [
-    {label:"Available", value:available, color: cssVar("--green") || "#237A43"},
-    {label:"Borrowed", value:borrowed, color: cssVar("--brass") || "#EBB134"},
-    {label:"Overdue", value:overdue, color: cssVar("--oxblood") || "#7A2E2E"},
-  ];
-  bar.innerHTML = segments.map(s=>
-    `<div class="shelf-bar-seg" data-w="${(s.value/total*100).toFixed(2)}" style="background:${s.color}"></div>`
-  ).join("");
-  requestAnimationFrame(()=>{
-    $all(".shelf-bar-seg", bar).forEach((el,i)=>{
-      gsap.to(el,{width:el.dataset.w+"%", duration:0.9, delay:0.1*i, ease:"power2.out"});
-    });
-  });
-  $("#shelf-bar-stats").innerHTML = segments.map(s=>
-    `<div class="sbs-item">
-      <div class="sbs-label"><span class="legend-dot" style="background:${s.color}"></span>${s.label}</div>
-      <div class="sbs-value">${s.value.toLocaleString()}</div>
-    </div>`
-  ).join("");
-}
-
-function renderMostBorrowed(){
-  const list = $("#most-borrowed-list");
-  const max = Math.max(...MOST_BORROWED.map(b=>b.count));
-  list.innerHTML = MOST_BORROWED.map((b,i)=>`
-    <div class="rank-row">
-      <div class="rn">${String(i+1).padStart(2,"0")}</div>
-      <div class="rank-main">
-        <div class="bar-row-top"><span class="t">${esc(b.title)}</span><span class="n">${b.count}</span></div>
-        <div class="bar-track"><div class="bar-fill" data-w="${(b.count/max*100).toFixed(0)}"></div></div>
-      </div>
-    </div>`).join("");
-  requestAnimationFrame(()=>{
-    $all(".bar-fill", list).forEach((el,i)=>{
-      gsap.to(el,{width:el.dataset.w+"%", duration:0.9, delay:0.06*i, ease:"power2.out"});
-    });
-  });
-}
-
-function renderRecentTransactions(){
-  const list = $("#recent-tx-list");
-  const recent = TRANSACTIONS.slice(-6).reverse();
-  $("#recent-tx-note").textContent = recent.length + " latest";
-  list.innerHTML = recent.map(tx=>{
-    const label = tx.type==="issue" ? "Issued to" : "Returned by";
-    const who = tx.userName || (findUser(tx.userId)||{}).name || "—";
-    const when = tx.type==="issue" ? tx.issueDate : tx.returnDate;
-    return `<div class="mini-row">
-      <div class="mini-avatar">${initialsOf(who)}</div>
-      <div class="mini-main">
-        <div class="mini-title">${esc(tx.bookTitle)}</div>
-        <div class="mini-sub">${label} ${esc(who)}</div>
-      </div>
-      <div class="mini-stamp">${fmtDate(when)}</div>
-    </div>`;
-  }).join("") || `<div class="mini-row"><div class="mini-main"><div class="mini-sub">No activity yet.</div></div></div>`;
-  revealStagger($all(".mini-row", list),{y:8, stagger:0.04});
-}
-
-function renderOverdueList(){
-  const list = $("#overdue-list");
-  const overdue = BOOKS.filter(b=>b.status==="Overdue");
-  const maxDaysLate = Math.max(...overdue.map(b=>daysBetween(b.dueDate, isoDaysAgo(0))), 1);
-  list.innerHTML = overdue.map(b=>{
-    const u = findUser(b.borrowedBy);
-    const days = daysBetween(b.dueDate, isoDaysAgo(0));
-    return `<div class="overdue-item">
-      <div class="overdue-row">
-        <div class="overdue-main">
-          <div class="overdue-title">${esc(b.title)}</div>
-          <div class="overdue-sub">${u?esc(u.name):"Unknown"} &middot; due ${fmtDate(b.dueDate)}</div>
-        </div>
-        <span class="overdue-days" aria-label="${days} days late">${days}d</span>
-      </div>
-      <div class="overdue-track" role="progressbar" aria-label="${days} days late" aria-valuemin="0" aria-valuemax="${maxDaysLate}" aria-valuenow="${days}">
-        <div class="overdue-fill" data-w="${(days/maxDaysLate*100).toFixed(0)}%"></div>
-      </div>
-    </div>`;
-  }).join("") || `<div class="mini-row"><div class="mini-main"><div class="mini-sub">Nothing overdue. Well kept shelves.</div></div></div>`;
-  revealStagger($all(".overdue-item, .mini-row", list),{y:8, stagger:0.04});
-  requestAnimationFrame(()=>{
-    $all(".overdue-fill", list).forEach((el,i)=>{
-      gsap.to(el,{width:el.dataset.w, duration:0.7, delay:0.08*i, ease:"power2.out"});
-    });
-  });
-}
-
-function renderRecentUsers(){
-  const list = $("#recent-users-list");
-  const recent = USERS.slice(-5).reverse();
-  list.innerHTML = recent.map(u=>`
-    <div class="mini-row">
-      <div class="mini-avatar">${initialsOf(u.name)}</div>
-      <div class="mini-main">
-        <div class="mini-title">${esc(u.name)}</div>
-        <div class="mini-sub">${esc(u.program)} &middot; Yr ${u.yearLevel}</div>
-      </div>
-      <div class="mini-stamp">${u.id}</div>
-    </div>`).join("");
-  revealStagger($all(".mini-row", list),{y:8, stagger:0.04});
+/* ---------- Notifications: real counts from api/notifs.php ---------- */
+async function refreshNotifications(){
+  const list = $("#notif-list"), dot = $("#notif-dot");
+  if(!list) return;
+  let items = [];
+  try{ items = (await api("notifs.php")).items || []; }
+  catch(e){ list.innerHTML = `<div class="drop-empty">Notifications are unavailable.</div>`; dot.hidden = true; return; }
+  dot.hidden = items.length===0;
+  list.innerHTML = items.map(n=>`<button class="drop-item" type="button" data-kind="${esc(n.kind)}"><span>${esc(n.title)}</span><small>${esc(n.when)}</small></button>`).join("")
+    || `<div class="drop-empty">You're all caught up.</div>`;
+  $all("[data-kind]", list).forEach(btn=> btn.addEventListener("click", ()=>{
+    closeAllPopovers();
+    const k = btn.dataset.kind;
+    if(k==="overdue") goToView("reports", {report:"overdue", force:true});
+    else if(k==="returns") goToView("reports", {report:"borrowing", force:true});
+    else goToView("dashboard", {force:true});
+  }));
 }
 
 
@@ -1047,7 +884,7 @@ function getFilteredBooks(){
   const {search, category, filters, sort} = state.books;
   const q = search.trim().toLowerCase();
   let list = BOOKS.filter(b=>{
-    const matchesSearch = !q || [b.title,b.author,b.isbn,b.category].some(v=>String(v).toLowerCase().includes(q));
+    const matchesSearch = !q || [b.title,b.author,b.isbn,b.category].some(v=>String(v ?? "").toLowerCase().includes(q));
     const matchesCategory = category==="all" || b.category===category;
     const matchesSubject = !filters.subjects.length || filters.subjects.includes(b.category);
     const matchesAuthor = !filters.authors.length || filters.authors.includes(b.author);
@@ -1055,16 +892,15 @@ function getFilteredBooks(){
     const matchesFormat = !filters.formats.length || filters.formats.includes(b.format);
     const matchesYear = !filters.years.length || filters.years.some(yid=>{
       const bucket = YEAR_BUCKETS.find(yb=>yb.id===yid);
-      return bucket && bucket.test(b.year);
+      return bucket && b.year!=null && bucket.test(b.year);
     });
     return matchesSearch && matchesCategory && matchesSubject && matchesAuthor && matchesAvailability && matchesFormat && matchesYear;
   });
-  const popularityOf = title => (MOST_BORROWED.find(m=>m.title===title) || {count:0}).count;
   list.sort((a,b)=>{
-    if(sort==="newest") return b.year - a.year;
+    if(sort==="newest") return (b.year||0) - (a.year||0);
     if(sort==="title") return a.title.localeCompare(b.title);
     if(sort==="author") return a.author.localeCompare(b.author);
-    if(sort==="popular") return popularityOf(b.title) - popularityOf(a.title);
+    if(sort==="popular") return (b.borrowCount||0) - (a.borrowCount||0);
     return 0; /* featured: curated catalog order */
   });
   return list;
@@ -1095,14 +931,20 @@ function renderBooks(){
 
   const grid = $("#books-grid");
   const empty = $("#books-empty");
+  const moreWrap = $("#books-more-wrap");
+  const sig = JSON.stringify([state.books.search, state.books.category, state.books.sort, state.books.filters]);
+  if(sig !== state.booksSig){ state.booksSig = sig; state.booksLimit = 48; }
   if(filtered.length===0){
-    grid.innerHTML = ""; grid.hidden = true; empty.hidden = false;
+    grid.innerHTML = ""; grid.hidden = true; empty.hidden = false; moreWrap.hidden = true;
     return;
   }
   grid.hidden = false; empty.hidden = true;
+  const shownBooks = filtered.slice(0, state.booksLimit);
+  moreWrap.hidden = shownBooks.length >= filtered.length;
+  $("#books-more").textContent = `Show more (${filtered.length - shownBooks.length} remaining)`;
 
   const showFeatured = !active && state.books.sort==="featured";
-  grid.innerHTML = filtered.map((b,i)=> bookCardHTML(b, i, {featured: showFeatured && i===0})).join("");
+  grid.innerHTML = shownBooks.map((b,i)=> bookCardHTML(b, i, {featured: showFeatured && i===0})).join("");
   revealStagger($all(".book-card", grid),{y:12, stagger:0.03});
   wireBookCards(grid);
 }
@@ -1223,7 +1065,7 @@ function buildFiltersPanel(){
     </div>
     <div class="filters-panel-body">
       ${group("Subject","subjects",CATEGORIES)}
-      ${group("Availability","availability",["Available","Borrowed","Reserved"])}
+      ${group("Availability","availability",["Available","Borrowed","Overdue"])}
       ${group("Format","formats",FORMATS)}
       ${group("Year","years",YEAR_BUCKETS,o=>o.label,o=>o.id)}
       ${group("Author","authors",authors)}
@@ -1279,18 +1121,6 @@ function openBookDetails(id){
   pushRecentlyViewed(id);
   goToView("book-details", {force:true});
 }
-function borrowBookMock(book){
-  book.status = "Borrowed";
-  book.issueDate = isoDaysAgo(0);
-  book.dueDate = isoDaysFromNow(CONFIG.loanDays);
-  showToast(`You've borrowed “${esc(book.title)}.” Due back ${fmtDate(book.dueDate)}.`);
-  renderBookDetails(book.id);
-}
-function reserveBookMock(book){
-  reservedBookIds.add(book.id);
-  showToast(`You're on the list for “${esc(book.title)}.” We'll notify you when it's back.`, {kind:"info"});
-  renderBookDetails(book.id);
-}
 function renderBookDetails(id){
   const root = $("#view-book-details");
   const book = findBook(id);
@@ -1304,13 +1134,11 @@ function renderBookDetails(id){
 
   const i = BOOKS.indexOf(book);
   const bucket = availabilityBucket(book);
-  const isSaved = savedBookIds.has(book.id);
 
   const bdCoverEl = $("#bd-cover");
   bdCoverEl.style.setProperty("--book-color", colorForBook(book, i));
   $("#bd-cover-initial").textContent = bookInitial(book);
-  const existingBdImg = $(".bd-cover-img", bdCoverEl);
-  if(existingBdImg) existingBdImg.remove();
+  $(".bd-cover-img", bdCoverEl)?.remove();
   if(book.cover){
     const bdImg = document.createElement("img");
     bdImg.className = "bd-cover-img";
@@ -1320,64 +1148,48 @@ function renderBookDetails(id){
     bdImg.onerror = ()=> bdImg.remove();
     bdCoverEl.prepend(bdImg);
   }
-  $("#bd-category").textContent = book.category;
+  $("#bd-category").textContent = book.category || "Uncategorized";
   $("#bd-title").textContent = book.title;
   $("#bd-author").textContent = "by " + book.author;
-  $("#bd-description").textContent = book.description;
+  $("#bd-description").textContent = book.description || "No description recorded for this title.";
 
+  const borrower = book.borrowedBy ? (findUser(book.borrowedBy) || {name:book.borrowedBy}) : null;
+  const who = borrower ? esc(borrower.name) : "a patron";
   const availEl = $("#bd-availability");
   if(bucket==="Available"){
-    availEl.innerHTML = `<span class="badge badge-available">Available</span><span class="bd-avail-note">Ready to borrow from the FEU Roosevelt Library.</span>`;
-  } else if(bucket==="Reserved"){
-    availEl.innerHTML = `<span class="badge badge-active">Reserved</span><span class="bd-avail-note">We'll hold this for you the moment it's returned.</span>`;
+    availEl.innerHTML = `<span class="badge badge-available">Available</span><span class="bd-avail-note">On the shelf and ready to issue.</span>`;
+  } else if(bucket==="Overdue"){
+    availEl.innerHTML = `<span class="badge badge-overdue">Overdue</span><span class="bd-avail-note">Borrowed by ${who}; was due ${fmtDate(book.dueDate)}.</span>`;
   } else {
-    const back = book.dueDate ? fmtDate(book.dueDate) : "soon";
-    availEl.innerHTML = `<span class="badge badge-borrowed">Currently borrowed</span><span class="bd-avail-note">Expected back around ${back}.</span>`;
+    availEl.innerHTML = `<span class="badge badge-borrowed">On loan</span><span class="bd-avail-note">Borrowed by ${who}; due ${fmtDate(book.dueDate)}.</span>`;
   }
 
   const primaryBtn = $("#bd-primary-action");
-  primaryBtn.disabled = false;
-  if(bucket==="Available"){
-    primaryBtn.textContent = "Borrow book";
-    primaryBtn.onclick = ()=> borrowBookMock(book);
-  } else if(bucket==="Reserved"){
-    primaryBtn.textContent = "Reserved";
-    primaryBtn.disabled = true;
-    primaryBtn.onclick = null;
-  } else {
-    primaryBtn.textContent = "Reserve this book";
-    primaryBtn.onclick = ()=> reserveBookMock(book);
-  }
-
-  const saveBtn = $("#bd-save-action");
-  saveBtn.textContent = isSaved ? "Saved to your collection" : "Save to collection";
-  saveBtn.classList.toggle("is-saved", isSaved);
-  saveBtn.onclick = ()=>{
-    const nowSaved = toggleSavedBook(book.id);
-    showToast(nowSaved ? `Saved “${esc(book.title)}” to your collection.` : `Removed “${esc(book.title)}” from your collection.`, {kind:"info"});
-    renderBookDetails(book.id);
-  };
+  primaryBtn.hidden = bucket!=="Available";
+  $("#bd-actions").hidden = primaryBtn.hidden;
+  primaryBtn.onclick = ()=> goToView("issue", {bookId:book.id});
 
   $("#bd-meta").innerHTML = `
-    <div class="bd-meta-item"><span class="bd-meta-k">Publication year</span><span class="bd-meta-v">${book.year<0 ? Math.abs(book.year)+" BC" : book.year}</span></div>
-    <div class="bd-meta-item"><span class="bd-meta-k">ISBN</span><span class="bd-meta-v cell-mono">${esc(book.isbn)}</span></div>
-    <div class="bd-meta-item"><span class="bd-meta-k">Category</span><span class="bd-meta-v">${esc(book.category)}</span></div>
-    <div class="bd-meta-item"><span class="bd-meta-k">Format</span><span class="bd-meta-v">${esc(book.format)}</span></div>`;
+    <div class="bd-meta-item"><span class="bd-meta-k">Publication year</span><span class="bd-meta-v">${book.year==null ? "—" : (book.year<0 ? Math.abs(book.year)+" BC" : book.year)}</span></div>
+    <div class="bd-meta-item"><span class="bd-meta-k">ISBN</span><span class="bd-meta-v cell-mono">${esc(book.isbn || "—")}</span></div>
+    <div class="bd-meta-item"><span class="bd-meta-k">Category</span><span class="bd-meta-v">${esc(book.category || "—")}</span></div>
+    <div class="bd-meta-item"><span class="bd-meta-k">Format</span><span class="bd-meta-v">${esc(book.format || "Not recorded")}</span></div>
+    <div class="bd-meta-item"><span class="bd-meta-k">Shelf</span><span class="bd-meta-v">${esc(book.location || "—")}</span></div>
+    <div class="bd-meta-item"><span class="bd-meta-k">Times borrowed</span><span class="bd-meta-v">${book.borrowCount || 0}</span></div>`;
 
   $("#bd-edit-link").onclick = ()=> openBookModal(book.id);
   $("#bd-remove-link").onclick = ()=> confirmDeleteBook(book.id);
 
-  const related = BOOKS.filter(b=> b.id!==book.id && b.category===book.category);
-  const relatedList = (related.length ? related : BOOKS.filter(b=>b.id!==book.id)).slice(0,6);
-  $("#bd-related-section").hidden = relatedList.length===0;
-  renderBookRow("bd-related-grid", relatedList);
+  const related = BOOKS.filter(b=> b.id!==book.id && b.category && b.category===book.category).slice(0,6);
+  $("#bd-related-section").hidden = related.length===0;
+  renderBookRow("bd-related-grid", related);
 
   const rv = recentlyViewedIds.filter(x=>x!==book.id).map(findBook).filter(Boolean).slice(0,6);
   $("#bd-recent-section").hidden = rv.length===0;
   renderBookRow("bd-recent-grid", rv);
 
   revealStagger($all(".book-details-layout, .related-books-section, .recently-viewed-section", root),{y:14, stagger:0.06});
-  root.scrollIntoView ? window.scrollTo({top:0, behavior:"instant"}) : null;
+  window.scrollTo({top:0, behavior:"instant"});
 }
 
 function wireRowActions(root, kind){
@@ -1410,20 +1222,26 @@ function wireRowActions(root, kind){
 
 /* ---------- Book modal (add / edit / view) ---------- */
 function bookFormTemplate(book, readonly){
-  const b = book || {title:"",author:"",category:CATEGORIES[0],isbn:"",year:new Date().getFullYear(),location:""};
+  const b = book || {title:"",author:"",category:CATEGORIES[0],isbn:"",year:"",location:"",description:"",format:"",cover:""};
   const dis = readonly ? "disabled" : "";
+  const uncategorized = book && !CATEGORIES.includes(book.category) ? `<option value="" selected>Uncategorized</option>` : "";
   return `
     <div class="form-grid">
       <div class="field full"><label for="f-title">Title</label><input id="f-title" type="text" value="${esc(b.title)}" ${dis} required></div>
       <div class="field"><label for="f-author">Author</label><input id="f-author" type="text" value="${esc(b.author)}" ${dis} required></div>
       <div class="field"><label for="f-category">Category</label>
-        <select id="f-category" ${dis}>${CATEGORIES.map(c=>`<option ${c===b.category?"selected":""}>${c}</option>`).join("")}</select>
+        <select id="f-category" ${dis}>${uncategorized}${CATEGORIES.map(c=>`<option ${c===b.category?"selected":""}>${c}</option>`).join("")}</select>
       </div>
       <div class="field"><label for="f-isbn">ISBN</label><input id="f-isbn" type="text" value="${esc(b.isbn)}" ${dis} required></div>
-      <div class="field"><label for="f-year">Publication Year</label><input id="f-year" type="number" value="${b.year}" ${dis} required></div>
-      <div class="field full"><label for="f-location">Shelf / Location</label><input id="f-location" type="text" value="${esc(b.location)}" placeholder="e.g. A-12" ${dis} required></div>
-      ${book ? `<div class="field"><label>Status</label><input type="text" value="${book.status}" disabled></div>
-      <div class="field"><label>Book ID</label><input type="text" value="${book.id}" disabled></div>` : ""}
+      <div class="field"><label for="f-year">Publication Year</label><input id="f-year" type="number" value="${b.year ?? ""}" ${dis}></div>
+      <div class="field"><label for="f-location">Shelf / Location</label><input id="f-location" type="text" value="${esc(b.location)}" placeholder="e.g. A-12" ${dis} required></div>
+      <div class="field"><label for="f-format">Format</label>
+        <select id="f-format" ${dis}><option value="">Not recorded</option>${FORMATS.map(f=>`<option ${f===b.format?"selected":""}>${f}</option>`).join("")}</select>
+      </div>
+      <div class="field full"><label for="f-description">Description</label><textarea id="f-description" rows="3" ${dis}>${esc(b.description)}</textarea><div class="hint">Optional. Leave blank if there is none.</div></div>
+      <div class="field full"><label for="f-cover">Cover image URL</label><input id="f-cover" type="url" value="${esc(b.cover)}" placeholder="https://…" ${dis}><div class="hint">Optional. Must start with http:// or https://.</div><div class="err">Enter a full http(s) image address.</div></div>
+      ${book ? `<div class="field"><label>Status</label><input type="text" value="${esc(book.status)}" disabled></div>
+      <div class="field"><label>Book ID</label><input type="text" value="${esc(book.id)}" disabled></div>` : ""}
     </div>`;
 }
 
@@ -1457,6 +1275,9 @@ async function saveBookForm(modalEl, existing){
     isbn: $("#f-isbn",modalEl).value.trim(),
     year: parseInt($("#f-year",modalEl).value,10),
     location: $("#f-location",modalEl).value.trim(),
+    format: $("#f-format",modalEl).value,
+    description: $("#f-description",modalEl).value.trim(),
+    cover: $("#f-cover",modalEl).value.trim(),
   };
   if (!Number.isFinite(vals.year)) vals.year = null;
   let missing=false;
@@ -1464,34 +1285,25 @@ async function saveBookForm(modalEl, existing){
     const field = document.getElementById(id).closest(".field");
     if(!v){ field.classList.add("invalid"); missing=true; } else { field.classList.remove("invalid"); }
   });
+  const coverField = $("#f-cover",modalEl).closest(".field");
+  if(vals.cover && !/^https?:\/\//i.test(vals.cover)){ coverField.classList.add("invalid"); missing=true; } else { coverField.classList.remove("invalid"); }
   if(missing || !vals.title){ shakeModal(modalEl); return; }
 
   try {
     if(existing){
       await api("books.php?id=" + encodeURIComponent(existing.id), {
         method:"PUT",
-        body: JSON.stringify({
-          ...vals,
-          description: existing.description,
-          format: existing.format,
-          cover: existing.cover,
-        }),
+        body: JSON.stringify(vals),
       });
       showToast(`“${esc(vals.title)}” updated successfully.`);
     } else {
       await api("books.php", {
         method:"POST",
-        body: JSON.stringify({
-          ...vals,
-          status:"Available",
-          description: BOOK_BLURBS[vals.title] || `A ${(vals.category||"general").toLowerCase()} title held in the FEU Roosevelt Library collection.`,
-          format: FORMATS[BOOKS.length % FORMATS.length],
-          cover: COVER_OVERRIDES[vals.title] || (vals.isbn ? `https://covers.openlibrary.org/b/isbn/${vals.isbn}-L.jpg` : null),
-        }),
+        body: JSON.stringify({ ...vals, status:"Available" }),
       });
       showToast("Book added successfully.");
     }
-    await refreshCatalog();
+    await refreshBooks();
     closeModal(()=>{ renderBooks(); renderDashboard(); });
   } catch (err) {
     showToast(err.message, {kind:"error"});
@@ -1503,7 +1315,7 @@ function confirmDeleteBook(id){
   const run = async ()=>{
     try {
       await api("books.php?id=" + encodeURIComponent(id), { method:"DELETE" });
-      await refreshCatalog();
+      await refreshBooks();
       if(state.currentView==="book-details" && state.selectedBookId===id){
         goToView("books", {force:true});
       } else {
@@ -1532,7 +1344,7 @@ function getFilteredUsers(){
   const {search, filter, sort} = state.users;
   let list = USERS.filter(u=>{
     const q = search.trim().toLowerCase();
-    const matchesSearch = !q || userNameMatches(u, q) || [u.id,u.program,u.contact].some(v=>String(v).toLowerCase().includes(q));
+    const matchesSearch = !q || userNameMatches(u, q) || [u.id,u.program,u.contact].some(v=>String(v ?? "").toLowerCase().includes(q));
     const matchesFilter = filter==="all" || u.status===filter;
     return matchesSearch && matchesFilter;
   });
@@ -1547,7 +1359,11 @@ function getFilteredUsers(){
 
 function renderUsers(){
   const filtered = getFilteredUsers();
-  const list = filtered.slice(0, CONFIG.pageSize || 25);
+  const usersSig = JSON.stringify([state.users.search, state.users.filter, state.users.sort]);
+  if(usersSig !== state.usersSig || !state.usersLimit){ state.usersSig = usersSig; state.usersLimit = CONFIG.pageSize || 25; }
+  const list = filtered.slice(0, state.usersLimit);
+  const usersMore = $("#users-more-wrap");
+  usersMore.hidden = list.length >= filtered.length;
   $("#users-count-sub").textContent = `${USERS.length} registered user${USERS.length===1?"":"s"} · ${filtered.length} matching · showing ${list.length}`;
   const tbody = $("#users-tbody");
   const cardList = $("#users-card-list");
@@ -1567,7 +1383,7 @@ function renderUsers(){
         <div class="cell-sub">${esc(u.contact)}</div>
       </td>
       <td>${esc(u.program)}</td>
-      <td>${u.yearLevel}</td>
+      <td>${u.yearLevel ?? "—"}</td>
       <td>${u.borrowedBookIds.length}</td>
       <td><span class="badge ${badgeClassFor(u.status)}">${u.status}</span></td>
       <td>
@@ -1588,7 +1404,7 @@ function renderUsers(){
   cardList.innerHTML = list.map(u=>`
     <div class="record-card" data-id="${u.id}" tabindex="0">
       <div class="rc-top">
-        <div><div class="rc-title">${esc(u.name)}</div><div class="rc-sub">${esc(u.program)} &middot; Yr ${u.yearLevel}</div></div>
+        <div><div class="rc-title">${esc(u.name)}</div><div class="rc-sub">${esc(u.program || "—")} &middot; Yr ${u.yearLevel ?? "—"}</div></div>
         <span class="badge ${badgeClassFor(u.status)}">${u.status}</span>
       </div>
       <div class="rc-meta"><span><b>${u.id}</b></span><span>${u.borrowedBookIds.length} book(s) out</span></div>
@@ -1606,6 +1422,8 @@ function renderUsers(){
   wireRowActions(cardList, "user");
 }
 
+$("#users-more").addEventListener("click", ()=>{ state.usersLimit += CONFIG.pageSize || 25; renderUsers(); });
+$("#books-more").addEventListener("click", ()=>{ state.booksLimit += 48; renderBooks(); });
 $("#users-search").addEventListener("input", e=>{ state.users.search = e.target.value; renderUsers(); });
 $("#users-sort").addEventListener("change", e=>{ state.users.sort = e.target.value; renderUsers(); });
 $all("#users-filter-chips .chip").forEach(chip=>{
@@ -1631,10 +1449,10 @@ function userFormTemplate(user, readonly){
         <div class="field"><label for="f-middleinitial">Middle Initial</label><input id="f-middleinitial" type="text" value="${esc(u.middleInitial)}" maxlength="1" autocomplete="off" ${dis}></div>
       </div>
       <div class="field"><label for="f-program">Course / Program</label>
-        <select id="f-program" ${dis}>${PROGRAMS.map(p=>`<option ${p===u.program?"selected":""}>${p}</option>`).join("")}</select>
+        <select id="f-program" ${dis}>${user && !u.program ? `<option value="" selected>Not specified</option>` : ""}${(user && u.program && !PROGRAMS.includes(u.program) ? [u.program, ...PROGRAMS] : PROGRAMS).map(p=>`<option ${p===u.program?"selected":""}>${esc(p)}</option>`).join("")}</select>
       </div>
       <div class="field"><label for="f-yearlevel">Year Level</label>
-        <select id="f-yearlevel" ${dis}>${[1,2,3,4,5].map(y=>`<option value="${y}" ${y===u.yearLevel?"selected":""}>Year ${y}</option>`).join("")}</select>
+        <select id="f-yearlevel" ${dis}>${user && u.yearLevel==null ? `<option value="" selected>Not specified</option>` : ""}${[1,2,3,4,5].map(y=>`<option value="${y}" ${y===u.yearLevel?"selected":""}>Year ${y}</option>`).join("")}</select>
       </div>
       <div class="field full"><label for="f-contact">Contact Information</label><input id="f-contact" type="email" value="${esc(u.contact)}" placeholder="name@feuroosevelt.edu" ${dis} required></div>
       ${user ? `
@@ -1701,7 +1519,7 @@ async function saveUserForm(modalEl, existing){
       await api("users.php", { method:"POST", body: JSON.stringify({ ...vals, status:"Active" }) });
       showToast("User registered successfully.");
     }
-    await refreshCatalog();
+    await refreshUsers();
     closeModal(()=>{ renderUsers(); renderDashboard(); });
   } catch (err) {
     showToast(err.message, {kind:"error"});
@@ -1710,6 +1528,7 @@ async function saveUserForm(modalEl, existing){
 
 function confirmDeleteUser(id){
   const user = findUser(id);
+  if(!user) return;
   if(user.borrowedBookIds.length){
     showToast("Can't remove a patron with active loans.", {warn:true});
     return;
@@ -1717,7 +1536,7 @@ function confirmDeleteUser(id){
   const run = async ()=>{
     try {
       await api("users.php?id=" + encodeURIComponent(id), { method:"DELETE" });
-      await refreshCatalog();
+      await refreshUsers();
       renderUsers();
       renderDashboard();
       showToast("User removed from records.", {warn:true});
@@ -1821,8 +1640,9 @@ function renderConfirm({title, body, confirmLabel, onConfirm}){
 /* ==================================================================
    ISSUE BOOK WORKFLOW
    ================================================================== */
-function resetIssueWizard(){
-  state.issue = {step:1, studentId:null, bookId:null};
+function resetIssueWizard(preBookId){
+  const pre = preBookId ? findBook(preBookId) : null;
+  state.issue = {step:1, studentId:null, bookId: pre && pre.status==="Available" ? pre.id : null};
   const issueInput = $("#issue-date");
   issueInput.value = isoDaysAgo(0);
   issueInput.readOnly = true;
@@ -1834,7 +1654,7 @@ function resetIssueWizard(){
   $("#issue-student-search").value = "";
   $("#issue-book-search").value = "";
   $("#issue-next-1").disabled = true;
-  $("#issue-next-2").disabled = true;
+  $("#issue-next-2").disabled = !state.issue.bookId;
   renderIssueStudentList("");
   renderIssueBookList("");
   goToIssueStep(1, true);
@@ -1901,7 +1721,7 @@ $("#issue-next-2").addEventListener("click", ()=>{
     <div class="cc-title">${esc(student.name)}</div>
     <div class="cc-row"><span>ID</span><b>${student.id}</b></div>
     <div class="cc-row"><span>Program</span><b>${esc(student.program)}</b></div>
-    <div class="cc-row"><span>Year</span><b>${student.yearLevel}</b></div>`;
+    <div class="cc-row"><span>Year</span><b>${student.yearLevel ?? "—"}</b></div>`;
   $("#issue-summary-book").innerHTML = `
     <div class="cc-callno">CALL NO. ${esc(book.location)}</div>
     <div class="cc-title">${esc(book.title)}</div>
@@ -2026,12 +1846,13 @@ $all('[data-next-return]').forEach(b=>{
 });
 function updateReturnCalc(){
   const b = findBook(state.ret.bookId);
+  if(!b) return;
   const today = isoDaysAgo(0);
   let returnDate = $("#return-date-input").value || today;
   if(returnDate > today) returnDate = today;
   if(b.issueDate && returnDate < b.issueDate) returnDate = b.issueDate;
   $("#return-date-input").value = returnDate;
-  const overdueDays = Math.max(0, daysBetween(b.dueDate, returnDate));
+  const overdueDays = b.dueDate ? Math.max(0, daysBetween(b.dueDate, returnDate)) : 0;
   const grace = CONFIG.gracePeriodDays || 0;
   const billable = CONFIG.overdueFinesEnabled ? Math.max(0, overdueDays - grace) : 0;
   $("#return-days-overdue").value = overdueDays===0 ? "Not overdue" : overdueDays + " day(s)";
@@ -2089,52 +1910,56 @@ $("#return-restart-btn").addEventListener("click", resetReturnWizard);
 /* ==================================================================
    REPORTS
    ================================================================== */
-function renderReports(type){
-  $all('.nav-item[data-report]').forEach(n=> n.classList.toggle('active', n.dataset.report===type));
+async function renderReports(type, opts={}){
+  type = type==="overdue" ? "overdue" : "borrowing";
+  state.reportType = type;
   const heading = $("#reports-heading"), sub = $("#reports-sub"), panelTitle = $("#reports-panel-title");
   const chartWrap = $("#reports-chart-wrap");
   const theadRow = $("#reports-thead-row"), tbody = $("#reports-tbody");
+  heading.textContent = type==="overdue" ? "Overdue Report" : "Borrowing Report";
+  panelTitle.textContent = type==="overdue" ? "Overdue loans by days late" : "Borrowing over the last 7 days";
+  try{
+    if(!opts.cached || !REPORT) await loadReport();
+  }catch(err){
+    theadRow.innerHTML = ""; tbody.innerHTML = "";
+    errorWithRetry(chartWrap, `Could not load the report: ${err.message}`, ()=> renderReports(type));
+    return;
+  }
+  if(state.reportType !== type) return; // user switched reports while loading
+  const r = REPORT;
+  $("#reports-note").textContent = `Live data · as of ${fmtDate(r.asOf)}`;
 
   if(type==="overdue"){
-    heading.textContent = "Overdue Report";
-    sub.textContent = "Every title currently past its due date, with the running fine.";
-    panelTitle.textContent = "Overdue volumes by days late";
-    const overdue = BOOKS.filter(b=>b.status==="Overdue").map(b=>({
-      title:b.title, days:daysBetween(b.dueDate, isoDaysAgo(0)),
-    }));
-    const max = Math.max(1,...overdue.map(o=>o.days));
-    chartWrap.innerHTML = overdue.length ? `<div class="report-overdue-list">${overdue.map(o=>`
+    sub.textContent = `Every loan currently past its due date. Estimated fines use the saved library rules (rate and grace period). Estimated total: ${peso(r.totals.estimatedOverdueFines)}.`;
+    const rows = r.overdue;
+    const max = Math.max(1, ...rows.map(o=>o.daysLate));
+    chartWrap.innerHTML = rows.length ? `<div class="report-overdue-list">${rows.map(o=>`
       <div class="report-overdue-item">
         <div class="report-overdue-row">
-          <span class="report-overdue-title">${esc(o.title)}</span>
-          <span class="report-overdue-days" aria-label="${o.days} days late">${o.days}d</span>
+          <span class="report-overdue-title">${esc(o.bookTitle)}</span>
+          <span class="report-overdue-days" aria-label="${o.daysLate} days late">${o.daysLate}d</span>
         </div>
-        <div class="report-overdue-track" role="progressbar" aria-label="${o.days} days late" aria-valuemin="0" aria-valuemax="${max}" aria-valuenow="${o.days}">
-          <div class="report-overdue-fill" style="background:var(--oxblood);" data-w="${(o.days/max*100).toFixed(0)}"></div>
+        <div class="report-overdue-track" role="progressbar" aria-label="${o.daysLate} days late" aria-valuemin="0" aria-valuemax="${max}" aria-valuenow="${o.daysLate}">
+          <div class="report-overdue-fill" style="background:var(--oxblood);" data-w="${(o.daysLate/max*100).toFixed(0)}"></div>
         </div>
       </div>`).join("")}</div>`
       : `<div class="empty-state" style="padding:40px;"><div class="s">Nothing overdue right now.</div></div>`;
     requestAnimationFrame(()=> $all(".report-overdue-fill", chartWrap).forEach((el,i)=> gsap.to(el,{width:el.dataset.w+"%", duration:0.8, delay:0.05*i})));
-
     theadRow.innerHTML = "<th>Book</th><th>Borrower</th><th>Due Date</th><th>Days Late</th><th>Est. Fine</th>";
-    const rate = parseFloat($("#settings-fine-rate").value) || CONFIG.finePerDay;
-    tbody.innerHTML = BOOKS.filter(b=>b.status==="Overdue").map(b=>{
-      const u = findUser(b.borrowedBy);
-      const days = daysBetween(b.dueDate, isoDaysAgo(0));
-      return `<tr><td class="cell-primary">${esc(b.title)}</td><td>${esc(u?u.name:"—")}</td><td class="cell-mono">${fmtDate(b.dueDate)}</td>
-        <td><span class="badge badge-overdue">${days}d</span></td><td class="cell-mono">₱${(days*rate).toFixed(2)}</td></tr>`;
-    }).join("") || `<tr><td colspan="5" style="text-align:center; color:var(--ink-soft); padding:30px;">No overdue records.</td></tr>`;
+    tbody.innerHTML = rows.map(o=>`<tr><td class="cell-primary">${esc(o.bookTitle)}</td><td>${esc(o.userName || "—")}</td><td class="cell-mono">${fmtDate(o.dueDate)}</td>
+        <td><span class="badge badge-overdue">${o.daysLate}d</span></td><td class="cell-mono">${peso(o.estimatedFine)}</td></tr>`).join("")
+      || `<tr><td colspan="5" style="text-align:center; color:var(--ink-soft); padding:30px;">No overdue records.</td></tr>`;
   } else {
-    heading.textContent = "Borrowing Report";
-    sub.textContent = "Issue and return activity across the collection.";
-    panelTitle.textContent = "Borrowing over the last 7 days";
-    renderActivityChart("reports-chart-wrap");
-    theadRow.innerHTML = "<th>Transaction</th><th>Book</th><th>Person</th><th>Date</th><th>Fine</th>";
-    tbody.innerHTML = TRANSACTIONS.slice().reverse().slice(0,12).map(t=>`
-      <tr><td><span class="badge ${t.type==='issue'?'badge-borrowed':'badge-available'}">${t.type==='issue'?'Issued':'Returned'}</span></td>
-      <td class="cell-primary">${esc(t.bookTitle)}</td><td>${esc(t.userName)}</td>
-      <td class="cell-mono">${fmtDate(t.type==='issue'?t.issueDate:t.returnDate)}</td>
-      <td class="cell-mono">${t.fine ? "₱"+t.fine.toFixed(2) : "—"}</td></tr>`).join("");
+    sub.textContent = `Issue and return activity. Fines assessed on returned loans to date: ${peso(r.totals.finesAssessed)}.`;
+    renderActivityChart("reports-chart-wrap", r.activity);
+    theadRow.innerHTML = "<th>Status</th><th>Book</th><th>Person</th><th>Issued</th><th>Returned</th><th>Fine</th>";
+    tbody.innerHTML = r.recent.map(t=>`
+      <tr><td><span class="badge ${badgeClassFor(t.status)}">${esc(t.status)}</span></td>
+      <td class="cell-primary">${esc(t.bookTitle)}</td><td>${esc(t.userName || "—")}</td>
+      <td class="cell-mono">${fmtDate(t.issueDate)}</td>
+      <td class="cell-mono">${fmtDate(t.returnDate)}</td>
+      <td class="cell-mono">${t.status==="Returned" ? peso(t.fine) : "—"}</td></tr>`).join("")
+      || `<tr><td colspan="6" style="text-align:center; color:var(--ink-soft); padding:30px;">No transactions recorded yet.</td></tr>`;
   }
 }
 
@@ -2229,8 +2054,7 @@ function fillProfileForm(){
   $("#profile-email").value = ACCOUNT.email;
   $("#profile-role").value = ACCOUNT.role;
   $("#profile-status").value = ACCOUNT.status;
-  $("#profile-password").value = "";
-  ["profile-name","profile-username","profile-email","profile-password"].forEach(id=> clearFieldError($("#"+id)));
+  ["profile-name","profile-username","profile-email"].forEach(id=> clearFieldError($("#"+id)));
 }
 
 function setProfileEditing(on){
@@ -2238,7 +2062,6 @@ function setProfileEditing(on){
   ["profile-name","profile-username","profile-email"].forEach(id=>{
     $("#"+id).disabled = !on;
   });
-  $("#profile-password").disabled = true;
   $("#profile-form-actions").hidden = !on;
   $("#edit-profile-btn").textContent = on ? "Editing…" : "Edit Profile";
   $("#edit-profile-btn").disabled = on;
@@ -2270,7 +2093,6 @@ function hydrateSettings(){
   $("#notif-newuser").checked = !!NOTIF_PREFS.newUser;
   $("#notif-returns").checked = !!NOTIF_PREFS.returns;
   $("#notif-system").checked = !!NOTIF_PREFS.system;
-  $("#sys-language").value = CONFIG.language;
   $("#sys-date-format").value = CONFIG.dateFormat;
   $("#sys-time-format").value = CONFIG.timeFormat;
   $("#sys-landing").value = CONFIG.landingPage || "dashboard";
@@ -2311,10 +2133,6 @@ $("#profile-form").addEventListener("submit", async e=>{
   if(name.length < 2) ok = setFieldError($("#profile-name"), "Enter a display name.");
   if(!/^[a-zA-Z0-9._-]{3,24}$/.test(username)) ok = setFieldError($("#profile-username"), "Use 3–24 letters, numbers, dots or dashes.");
   if(!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) ok = setFieldError($("#profile-email"), "Enter a valid email.");
-  if($("#profile-password").value){
-    showToast("Passwords are not stored. Use Security to preview a password change.", {kind:"info"});
-    $("#profile-password").value = "";
-  }
   if(!ok){
     showToast("Please check the highlighted fields.", {kind:"error"});
     return;
@@ -2453,6 +2271,7 @@ $("#settings-save-btn").addEventListener("click", async ()=>{
     return;
   }
   const btn = $("#settings-save-btn");
+  const prevConfig = Object.assign({}, CONFIG);
   markSaving(btn, true);
   try {
     CONFIG.libraryName = name;
@@ -2467,6 +2286,7 @@ $("#settings-save-btn").addEventListener("click", async ()=>{
     await persistConfig();
     showToast("Library settings saved.");
   } catch (err) {
+    Object.assign(CONFIG, prevConfig); // unsaved values must not drive fines or limits
     showToast(err.message, {kind:"error"});
   } finally {
     markSaving(btn, false);
@@ -2493,7 +2313,7 @@ $("#notif-prefs-save").addEventListener("click", async ()=>{
 
 function passwordScore(pw){
   let s = 0;
-  if(pw.length >= 8) s++;
+  if(pw.length >= 10) s++;
   if(/[A-Z]/.test(pw) && /[a-z]/.test(pw)) s++;
   if(/\d/.test(pw)) s++;
   if(/[^A-Za-z0-9]/.test(pw)) s++;
@@ -2506,7 +2326,7 @@ $("#sec-new-pass")?.addEventListener("input", ()=>{
   const label = $("#pw-meter-label");
   if(bar) bar.style.width = (score/4*100) + "%";
   if(bar) bar.dataset.score = String(score);
-  if(label) label.textContent = !pw ? "Use 8 or more characters." : ["Weak","Fair","Good","Strong"][Math.max(0,score-1)];
+  if(label) label.textContent = !pw ? "Use 10 or more characters." : ["Weak","Fair","Good","Strong"][Math.max(0,score-1)];
 });
 $all(".pw-toggle").forEach(btn=>{
   btn.addEventListener("click", ()=>{
@@ -2560,7 +2380,7 @@ $("#sec-logout-one").addEventListener("click", ()=>{
 });
 
 $("#sys-save-btn").addEventListener("click", async ()=>{
-  CONFIG.language = $("#sys-language").value;
+  const prevConfig = Object.assign({}, CONFIG);
   CONFIG.dateFormat = $("#sys-date-format").value;
   CONFIG.timeFormat = $("#sys-time-format").value;
   CONFIG.landingPage = $("#sys-landing").value;
@@ -2574,6 +2394,7 @@ $("#sys-save-btn").addEventListener("click", async ()=>{
     applyDensity();
     showToast("System preferences saved.");
   } catch (err) {
+    Object.assign(CONFIG, prevConfig);
     showToast(err.message, {kind:"error"});
   } finally {
     markSaving(btn, false);
@@ -2583,22 +2404,19 @@ $("#sys-save-btn").addEventListener("click", async ()=>{
 $("#settings-reset-btn").addEventListener("click", ()=>{
   renderConfirm({
     title:"Reset settings to defaults?",
-    body:"Profile, appearance, library, notification, and system preferences on this device will be restored. Books, users, and transactions are not deleted.",
+    body:"Library, system, notification and appearance preferences will be restored to their defaults. Your account (name, username, email, photo), books, patrons and transactions are not changed.",
     confirmLabel:"Reset settings",
     onConfirm: async ()=>{
       try {
-        Object.assign(CONFIG, DEFAULT_CONFIG);
-        Object.assign(ACCOUNT, DEFAULT_ACCOUNT, {lastLogin: ACCOUNT.lastLogin});
+        const saved = await api("settings.php", { method:"PUT", body: JSON.stringify({action:"reset"}) });
+        if (saved.settings) Object.assign(CONFIG, saved.settings);
         Object.assign(NOTIF_PREFS, DEFAULT_NOTIFS);
-        ACCOUNT.avatarDataUrl = null;
-        ACCOUNT.avatarPreset = null;
-        await persistConfig();
-        await persistAccount();
         await persistNotifs();
         localStorage.setItem(STORAGE.theme, "light");
         applyTheme("light", true);
         applyDensity();
         hydrateSettings();
+        refreshNotifications();
         showToast("Settings restored to defaults.");
       } catch (err) {
         showToast(err.message, {kind:"error"});
@@ -2669,7 +2487,7 @@ function revealApp(){
   tl.from(".site-hero-copy", {opacity:0, y:18, duration:0.55, ease:"power2.out"}, "-=0.2");
   tl.from(".site-hero-visual", {opacity:0, y:18, duration:0.55, ease:"power2.out"}, "-=0.4");
   tl.call(()=>{
-    renderHomepage();
+    renderDashboard();
     const start = CONFIG.landingPage || "dashboard";
     if(start !== "dashboard") goToView(start, {force:true});
   });
@@ -2711,6 +2529,7 @@ $("#login-form").addEventListener("submit", async e=>{
       body:JSON.stringify({action:"login", username, password}),
     });
     await bootstrapFromApi();
+    sessionExpiredHandled = false;
     hydrateSettings();
     paintAvatars();
     $("#login-password").value = "";

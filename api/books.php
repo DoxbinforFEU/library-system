@@ -57,13 +57,30 @@ if ($method === 'GET') {
         $order = 'title ASC';
     }
 
-    $query = "SELECT * FROM books WHERE $whereSql ORDER BY $order LIMIT ? OFFSET ?";
+    $query = "SELECT books.*, (SELECT COUNT(*) FROM transactions t WHERE t.book_id = books.id AND t.type = 'issue') AS borrow_count
+        FROM books WHERE $whereSql ORDER BY $order LIMIT ? OFFSET ?";
     $params[] = $limit;
     $params[] = $offset;
     $stmt = $pdo->prepare($query);
     $stmt->execute($params);
     $books = array_map('mapBook', $stmt->fetchAll());
     sendResponse(['books' => $books, 'total' => $total, 'limit' => $limit, 'offset' => $offset]);
+}
+
+/** Cover must be empty or a full http(s) URL. Returns the cleaned value (null when empty). */
+function normalizeCoverUrl($value, array &$errors): ?string {
+    if ($value === null) {
+        return null;
+    }
+    $v = trim((string)$value);
+    if ($v === '') {
+        return null;
+    }
+    if (mb_strlen($v) > 2000 || !preg_match('#^https?://#i', $v) || !filter_var($v, FILTER_VALIDATE_URL)) {
+        $errors['cover'] = 'Enter a valid http(s) image address.';
+        return null;
+    }
+    return $v;
 }
 
 function updateBookRow(PDO $pdo, string $id, array $data): void {
@@ -113,7 +130,7 @@ function updateBookRow(PDO $pdo, string $id, array $data): void {
         } elseif ($col === 'description') {
             $value = $value === '' || $value === null ? null : mb_substr(trim((string)$value), 0, 4000);
         } elseif ($col === 'cover_url') {
-            $value = $value === '' || $value === null ? null : mb_substr(trim((string)$value), 0, 2000);
+            $value = normalizeCoverUrl($value, $errors);
         }
         $fields[] = "`$col` = ?";
         $params[] = $value === '' ? null : $value;
@@ -147,8 +164,7 @@ if ($method === 'POST') {
     $year = validateYear($data['year'] ?? null, $errors);
     $location = validateStringLength($data['location'] ?? '', 0, 20, 'location', $errors, false);
     $description = isset($data['description']) ? mb_substr(trim((string)$data['description']), 0, 4000) : null;
-    $cover = $data['cover'] ?? $data['cover_url'] ?? null;
-    $cover = $cover === '' ? null : $cover;
+    $cover = normalizeCoverUrl($data['cover'] ?? $data['cover_url'] ?? null, $errors);
     if ($errors) {
         sendValidationError($errors);
     }

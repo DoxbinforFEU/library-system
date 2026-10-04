@@ -261,7 +261,6 @@ html[data-theme="dark"] .brand .tag{color:var(--brass);}
   text-transform:uppercase; color:var(--ink-soft); margin-top:3px;
 }
 .header-actions{margin-left:auto; display:flex; align-items:center; gap:10px; position:relative;}
-#notif-pop{display:none;}
 .search-toggle{display:none;}
 .hamburger{
   display:none;
@@ -386,6 +385,10 @@ html[data-theme="dark"] .brand .tag{color:var(--brass);}
 #view-dashboard{
   margin:-28px calc(-1 * var(--header-pad)) -60px;
 }
+/* The homepage bleeds edge-to-edge (hero, tinted sections, footer), so it
+   cancels out the shared .view-port padding rather than changing it for
+   every other view. */
+
 
 /* ============================================================
    SITE HERO
@@ -1701,3 +1704,28 @@ html[data-theme="dark"] .category-pill.active{color:var(--green);}
   .collection-search{padding:13px 14px; border-radius:14px;}
   .collection-hero-top{flex-direction:column;}
 }
+
+/* ============================================================
+   DASHBOARD (operational) + shared status helpers
+   ============================================================ */
+.dash-status{
+  display:flex; align-items:center; gap:12px; flex-wrap:wrap;
+  padding:12px 16px; margin-bottom:18px;
+  border:1px solid var(--oxblood); border-radius:var(--radius-md);
+  color:var(--oxblood); font-size:13.5px; background:var(--oxblood-tint);
+}
+.dash-status[hidden]{display:none;}
+.chart-empty{margin-top:8px; font-size:12.5px; color:var(--ink-soft); text-align:center;}
+.drop-empty{padding:12px 10px; font-size:13px; color:var(--ink-soft);}
+.book-card-availability-pill.badge-overdue{background:#7A2E2E; color:#fff;}
+.book-card-dot.badge-overdue{background:var(--oxblood);}
+.bd-actions[hidden]{display:none;}
+.overdue-more{margin-top:14px;}
+
+/* Dark-mode badge text (tint backgrounds are dark, so labels need light text) */
+html[data-theme="dark"] .badge-available{background:rgba(76,184,114,0.16); color:#8FD6A6;}
+html[data-theme="dark"] .badge-borrowed{background:rgba(217,165,43,0.16); color:#E4BA55;}
+html[data-theme="dark"] .badge-overdue{background:rgba(224,147,138,0.16); color:#F0B3AB;}
+html[data-theme="dark"] .badge-active{background:rgba(76,184,114,0.16); color:#8FD6A6;}
+html[data-theme="dark"] .badge-inactive{background:rgba(241,243,234,0.10); color:var(--ink-soft);}
+.load-more-wrap[hidden]{display:none;}
