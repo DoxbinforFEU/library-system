@@ -1,5 +1,7 @@
 -- FEU Roosevelt Library — schema only (MySQL 8.0+ / MariaDB 10.4+)
--- Does not insert sample data. Import seed.sql separately for a demo catalog.
+-- Does not insert sample data. After importing, run `php tools/migrate.php --yes` from the project
+-- folder to apply the managed schema steps (indexes, constraints, open-loan guard).
+-- Development sample data is created automatically when APP_ENV=development.
 
 CREATE DATABASE IF NOT EXISTS feu_library
   CHARACTER SET utf8mb4
@@ -160,8 +162,8 @@ INSERT INTO id_counters (name, next_value) VALUES
   ('reservations', 1)
 ON DUPLICATE KEY UPDATE name = name;
 
--- Foreign keys (safe to skip if already present)
--- Run these once on a fresh database.
+-- Foreign keys: fresh database only. tools/migrate.php adds any that are missing and is the
+-- repeatable way to apply them; do NOT re-run this file on a database that has records.
 
 ALTER TABLE books
   ADD CONSTRAINT fk_books_borrowed_by

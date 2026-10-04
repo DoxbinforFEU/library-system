@@ -20,13 +20,8 @@ function indexExists(PDO $pdo, string $table, string $index): bool {
     return (int)$stmt->fetchColumn() > 0;
 }
 
-function ensureSchema(PDO $pdo): void {
-    static $done = false;
-    if ($done) {
-        return;
-    }
-    $done = true;
-
+/** Idempotent baseline: tables, columns, indexes, id counters, admin role enum. Run ONLY from tools/migrate.php. */
+function ensureBaselineSchema(PDO $pdo): void {
     $pdo->exec("
         CREATE TABLE IF NOT EXISTS id_counters (
           name VARCHAR(32) PRIMARY KEY,
@@ -113,19 +108,6 @@ function ensureSchema(PDO $pdo): void {
     $upsert->execute(['reservations', $maxRes + 1]);
 
     ensureAdminRoleEnum($pdo);
-    if (strtolower((string)(getenv('APP_ENV') ?: 'production')) === 'development') {
-        require_once __DIR__ . '/dev_seed.php';
-        try {
-            ensureDefaultAdmin($pdo);
-        } catch (Throwable $e) {
-            error_log('[feu-library] development admin seed failed: ' . $e->getMessage());
-        }
-        try {
-            ensureDevCatalogSeed($pdo);
-        } catch (Throwable $e) {
-            error_log('[feu-library] catalog seed failed: ' . $e->getMessage());
-        }
-    }
 }
 
 function ensureAdminRoleEnum(PDO $pdo): void {
@@ -139,4 +121,38 @@ function ensureAdminRoleEnum(PDO $pdo): void {
         return;
     }
     $pdo->exec("ALTER TABLE auth_users MODIFY COLUMN role ENUM('admin','librarian','patron') NOT NULL DEFAULT 'patron'");
+}
+
+/** Development-only sample data. Cheap no-op once seeded; never touches the schema. */
+function ensureDevSeeds(PDO $pdo): void {
+    static $done = false;
+    if ($done) {
+        return;
+    }
+    $done = true;
+    $needsAdmin = (int)$pdo->query("SELECT COUNT(*) FROM auth_users WHERE username = 'admin'")->fetchColumn() === 0;
+    $needsCatalog = true;
+    try {
+        $needsCatalog = (int)$pdo->query("SELECT COUNT(*) FROM seed_meta WHERE name = 'dev_catalog_v1'")->fetchColumn() === 0;
+    } catch (Throwable $e) {
+        $needsCatalog = true;
+    }
+    if (!$needsAdmin && !$needsCatalog) {
+        return;
+    }
+    require_once __DIR__ . '/dev_seed.php';
+    if ($needsAdmin) {
+        try {
+            ensureDefaultAdmin($pdo);
+        } catch (Throwable $e) {
+            error_log('[feu-library] development admin seed failed: ' . $e->getMessage());
+        }
+    }
+    if ($needsCatalog) {
+        try {
+            ensureDevCatalogSeed($pdo);
+        } catch (Throwable $e) {
+            error_log('[feu-library] catalog seed failed: ' . $e->getMessage());
+        }
+    }
 }

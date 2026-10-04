@@ -276,6 +276,10 @@ try {
     if ($pdo->inTransaction()) {
         $pdo->rollBack();
     }
+    if ($e instanceof PDOException && (int)($e->errorInfo[1] ?? 0) === 1062 && str_contains($e->getMessage(), 'uk_tx_open_book')) {
+        // Database-level guard: a second open loan for the same book was rejected.
+        sendError('This title already has an open loan.', 409);
+    }
     if ($e instanceof PDOException && in_array((int)($e->errorInfo[1] ?? 0), [1205, 1213], true)) {
         sendError('That record is busy. Please try again.', 409);
     }
